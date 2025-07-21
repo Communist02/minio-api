@@ -23,12 +23,10 @@ class Client:
     def __init__(self, endpoint_url: str, access_key: str, secret_key: str, encryption_key: str):
         self.client = Minio(endpoint_url, access_key=access_key,
                             secret_key=secret_key)
-        self.bucket_name = 'abc'
         self.encryption_key = SseCustomerKey(base64.b64decode(encryption_key))
 
-    async def get_files(self) -> list[dict]:
+    async def get_files(self, bucket_name) -> list[dict]:
         client = self.client
-        bucket_name = self.bucket_name
 
         try:
             objects = client.list_objects(bucket_name, recursive=True)
@@ -67,9 +65,30 @@ class Client:
                 }
             )
 
-    async def delete_files(self, paths: list[str]):
+    async def get_buckets(self) -> list[str]:
         client = self.client
-        bucket_name = self.bucket_name
+
+        try:
+            buckets = client.list_buckets()
+            # print(buckets)
+            result: list[str] = []
+
+            for bucket in buckets:
+                result.append(bucket.name)
+
+            return result
+        except S3Error as error:
+            print(f'Error fetching files: {error.message}')
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    'error': 'Failed to retrieve files',
+                    'message': error.message
+                }
+            )
+
+    async def delete_files(self, bucket_name: str, paths: list[str]):
+        client = self.client
 
         for path in paths:
             object_name = path.strip('/')
@@ -89,9 +108,8 @@ class Client:
                 for obj in objects:
                     client.remove_object(bucket_name, obj.object_name)
 
-    async def get_download_url(self, object_key: str, expires_seconds: int = 3600):
+    async def get_download_url(self, bucket_name: str, object_key: str, expires_seconds: int = 3600) -> str:
         client = self.client
-        bucket_name = self.bucket_name
 
         try:
             object_name = object_key.lstrip('/')
@@ -110,12 +128,11 @@ class Client:
                 detail=f'Failed to generate download URL: {error.message}'
             )
 
-    async def download_file(self, object_key: str):
+    async def download_file(self, bucket_name: str, file_path: str) -> StreamingResponse:
         client = self.client
-        bucket_name = self.bucket_name
 
         try:
-            object_name = object_key.lstrip('/')
+            object_name = file_path.lstrip('/')
             objects = client.list_objects(
                 bucket_name=bucket_name, prefix=object_name)
             for obj in objects:
@@ -130,9 +147,8 @@ class Client:
                 detail=f'Failed to generate download URL: {error.message}'
             )
 
-    async def copy_files(self, source_paths: list[str], destination_path: str):
+    async def copy_files(self, bucket_name: str, source_paths: list[str], destination_path: str):
         client = self.client
-        bucket_name = self.bucket_name
 
         for source in source_paths:
             if source.endswith('/'):  # папка
@@ -177,9 +193,8 @@ class Client:
                         detail=f"Failed copy file '{object_name}': {error.message}"
                     )
 
-    async def rename_file(self, path: str, new_name: str):
+    async def rename_file(self, bucket_name: str, path: str, new_name: str):
         client = self.client
-        bucket_name = self.bucket_name
 
         object_name = path.strip('/')
         new_object_name = object_name[:-
@@ -227,31 +242,32 @@ class Client:
 
         await self.delete_files([path])
 
-    async def upload_file(self, file: UploadFile, path: str):
+    async def upload_file(self, bucket_name: str, file: UploadFile, path: str):
         client = self.client
-        bucket_name = self.bucket_name
 
         await asyncio.to_thread(client.put_object, bucket_name, path.strip(
             '/') + '/' + file.filename, file.file, file.size, sse=self.encryption_key)
 
-    async def new_folder(self, name: str, path: str):
+    async def new_folder(self, bucket_name: str, name: str, path: str):
         client = self.client
-        bucket_name = self.bucket_name
         client.put_object(
             bucket_name, f'{path.strip('/')}/{name}/NODATA', io.BytesIO(b''), 0, sse=self.encryption_key)
 
 
 class CopyRequest(BaseModel):
+    bucket: str
     sourcePaths: list[str]
     destinationPath: str
 
 
 class RenameRequest(BaseModel):
+    bucket: str
     path: str
     newName: str
 
 
 class NewFolderRequest(BaseModel):
+    bucket: str
     name: str
     path: str
 
@@ -264,41 +280,46 @@ minio = Client('play.min.io', access_key='minioadmin',
 
 
 @app.get('/')
-async def get_all_files():
-    return json.dumps(await minio.get_files())
+async def get_all_files(bucket: str) -> str:
+    return json.dumps(await minio.get_files(bucket))
+
+
+@app.get('/buckets')
+async def get_buckets() -> str:
+    return json.dumps(await minio.get_buckets())
 
 
 @app.get('/download')
-async def download(file: str):
+async def download(bucket: str, file: str) -> StreamingResponse:
     file = file.strip('/')
-    return await minio.download_file(file)
+    return await minio.download_file(bucket, file)
 
 
 @app.delete('/')
-async def delete(files: str):
-    await minio.delete_files(files.split('|'))
+async def delete(bucket: str, files: str):
+    await minio.delete_files(bucket, files.split('|'))
     return True
 
 
 @app.post('/copy')
 async def copy(request: CopyRequest):
-    await minio.copy_files(request.sourcePaths, request.destinationPath)
+    await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath)
     return True
 
 
 @app.post('/rename')
 async def rename(request: RenameRequest):
-    await minio.rename_file(request.path, request.newName)
+    await minio.rename_file(request.bucket, request.path, request.newName)
     return True
 
 
 @app.post('/folder')
 async def folder(request: NewFolderRequest):
-    await minio.new_folder(request.name, request.path)
+    await minio.new_folder(request.bucket, request.name, request.path)
     return True
 
 
 @app.put('/')
-async def upload(file: UploadFile, path: Annotated[str, Form()]):
-    await minio.upload_file(file, path)
+async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()]):
+    await minio.upload_file(bucket, file, path)
     return file.filename
