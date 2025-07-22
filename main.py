@@ -6,7 +6,7 @@ from typing import Annotated
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, UploadFile, Request
 from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel
@@ -128,7 +128,7 @@ class Client:
                 detail=f'Failed to generate download URL: {error.message}'
             )
 
-    async def download_file(self, bucket_name: str, file_path: str) -> StreamingResponse:
+    async def download_file(self, bucket_name: str, file_path: str, range_header: str = None) -> StreamingResponse:
         client = self.client
 
         try:
@@ -137,9 +137,48 @@ class Client:
                 bucket_name=bucket_name, prefix=object_name)
             for obj in objects:
                 file_size = obj.size
-            obj = client.get_object(
-                bucket_name, object_name=object_name, ssec=self.encryption_key)
-            return StreamingResponse(obj, media_type='application/octet-stream', headers={'Content-Disposition': f"attachment; filename*=UTF-8''{quote(object_name.split('/')[-1])}", 'Content-Length': str(file_size)})
+            headers = {
+                'Content-Disposition': f"attachment; filename*=UTF-8''{quote(object_name.split('/')[-1])}",
+                'Content-Length': str(file_size),
+                'Accept-Ranges': 'bytes',
+            }
+            if range_header:
+                # Парсим заголовок Range (формат "bytes=start-end")
+                start_end = range_header.replace('bytes=', '').split('-')
+                start = int(start_end[0])
+                end = int(start_end[1]) if start_end[1] else file_size - 1
+
+                # Получаем только запрошенный диапазон байтов
+                obj = client.get_object(
+                    bucket_name,
+                    object_name=object_name,
+                    ssec=self.encryption_key,
+                    offset=start,
+                    length=end - start + 1
+                )
+
+                # Устанавливаем соответствующие заголовки для частичного контента
+                headers['Content-Length'] = str(end - start + 1)
+                headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+
+                return StreamingResponse(
+                    obj,
+                    media_type='application/octet-stream',
+                    headers=headers,
+                    status_code=206  # Partial Content
+                )
+            else:
+                # Полный файл, если нет заголовка Range
+                obj = client.get_object(
+                    bucket_name,
+                    object_name=object_name,
+                    ssec=self.encryption_key
+                )
+                return StreamingResponse(
+                    obj,
+                    media_type='application/octet-stream',
+                    headers=headers
+                )
         except S3Error as error:
             print(f'Failed to generate download URL: {error.message}')
             raise HTTPException(
@@ -290,9 +329,10 @@ async def get_buckets() -> str:
 
 
 @app.get('/download')
-async def download(bucket: str, file: str) -> StreamingResponse:
+async def download(bucket: str, file: str, request: Request) -> StreamingResponse:
     file = file.strip('/')
-    return await minio.download_file(bucket, file)
+    range_header = request.headers.get('Range')
+    return await minio.download_file(bucket, file, range_header)
 
 
 @app.delete('/')

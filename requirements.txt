@@ -1,2 +1,4 @@
 fastapi[standard]
 minio
+cryptography
+argon2-cffi
