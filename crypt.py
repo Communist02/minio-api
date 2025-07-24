@@ -1,3 +1,4 @@
+import secrets
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
@@ -7,44 +8,11 @@ import os
 from argon2.low_level import hash_secret_raw, Type
 
 
-# def encrypt_password(password: str) -> list[bytes]:
-#     """Derives X25519 key pair from password using HKDF."""
-
-#     password = password.encode()
-
-#     context_info = b'mn,yghjghjghcx-context-v1'
-
-#     hkdf = HKDF(
-#         algorithm=hashes.SHA256(),
-#         length=32,
-#         salt=None,
-#         info=context_info,
-#         backend=default_backend()
-#     )
-
-#     private_bytes = hkdf.derive(password)
-
-#     private_key = x25519.X25519PrivateKey.from_private_bytes(private_bytes)
-#     public_key = private_key.public_key()
-#     return [
-#         public_key.public_bytes(
-#             encoding=serialization.Encoding.Raw,
-#             format=serialization.PublicFormat.Raw
-#         ),
-#         private_key.private_bytes(
-#             encoding=serialization.Encoding.Raw,
-#             format=serialization.PrivateFormat.Raw,
-#             encryption_algorithm=serialization.NoEncryption()
-#         )
-#     ]
-
-def encrypt_password(password: str, salt: bytes = os.urandom(16)) -> tuple[bytes, bytes, bytes]:
-    """Encrypts a secret key using recipient's X25519 public key and AES-GCM. Salt minimum length is 8."""
-
+def hash_argon2_password(password: str, salt: bytes = os.urandom(16)) -> bytes:
     password_bytes = password.encode()
 
     # Apply Argon2id for password stretching
-    stretched_key = hash_secret_raw(
+    hash = hash_secret_raw(
         secret=password_bytes,
         salt=salt,
         time_cost=3,
@@ -53,19 +21,22 @@ def encrypt_password(password: str, salt: bytes = os.urandom(16)) -> tuple[bytes
         hash_len=32,
         type=Type.ID
     )
+    return hash
 
-    # Use stretched key as input to HKDF
-    context_info = b'mn,yghjghjghcx-context-v1'
-    hkdf = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=None,
-        info=context_info,
-        backend=default_backend()
-    )
-    private_bytes = hkdf.derive(stretched_key)
 
-    private_key = x25519.X25519PrivateKey.from_private_bytes(private_bytes)
+def hash_division(hash: bytes) -> tuple[bytes, bytes]:
+    part1 = secrets.token_bytes(len(hash))
+    part2 = bytes(h ^ p for h, p in zip(hash, part1))
+
+    return part1, part2
+
+
+def hash_reconstruct(part1: bytes, part2: bytes) -> bytes:
+    return bytes(a ^ b for a, b in zip(part1, part2))
+
+
+def derive_key_pair_from_hash(hash: bytes) -> tuple[bytes, bytes, bytes]:
+    private_key = x25519.X25519PrivateKey.from_private_bytes(hash)
     public_key = private_key.public_key()
 
     return (
@@ -77,8 +48,7 @@ def encrypt_password(password: str, salt: bytes = os.urandom(16)) -> tuple[bytes
             encoding=serialization.Encoding.Raw,
             format=serialization.PrivateFormat.Raw,
             encryption_algorithm=serialization.NoEncryption()
-        ),
-        salt  # Save this for future derivation (e.g., during decryption)
+        )
     )
 
 
@@ -149,45 +119,3 @@ def decrypt_key(encrypted_key: bytes, private_key: bytes) -> bytes:
         nonce, tag), backend=default_backend())
     decryptor = cipher.decryptor()
     return decryptor.update(ciphertext) + decryptor.finalize()
-
-
-def recover_private_key_from_password(password: str, salt: bytes) -> bytes:
-    password_bytes = password.encode()
-
-    stretched_key = hash_secret_raw(
-        secret=password_bytes,
-        salt=salt,
-        time_cost=3,
-        memory_cost=64 * 1024,
-        parallelism=2,
-        hash_len=32,
-        type=Type.ID
-    )
-
-    hkdf = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=None,
-        info=b'mn,yghjghjghcx-context-v1',
-        backend=default_backend()
-    )
-    private_bytes = hkdf.derive(stretched_key)
-
-    return private_bytes
-
-
-password = '123456'
-keys = encrypt_password(password, b'1'*8)
-print(keys)
-
-recovered_private_key = recover_private_key_from_password('123456', keys[2])
-
-key = b'1234' * 8
-enc_key = encrypt_key(key, keys[0])
-dec_key = decrypt_key(enc_key, keys[1])
-
-print(keys)
-print(recovered_private_key)
-print(key)
-print(enc_key)
-print(dec_key)

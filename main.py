@@ -6,24 +6,23 @@ from typing import Annotated
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
-from fastapi import FastAPI, Form, HTTPException, UploadFile, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, Request
 from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel
 from minio.commonconfig import CopySource
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
-
-
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sessions import WebSessionsBase
+from crypt import hash_argon2_password, hash_division, hash_reconstruct
+import secrets
 
 
 class Client:
-    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, encryption_key: str):
-        self.client = Minio(endpoint_url, access_key=access_key,
-                            secret_key=secret_key)
-        self.encryption_key = SseCustomerKey(base64.b64decode(encryption_key))
+    def __init__(self, endpoint_url: str, access_key: str, secret_key: str):
+        self.client = Minio(
+            endpoint_url, access_key=access_key, secret_key=secret_key)
 
     async def get_files(self, bucket_name) -> list[dict]:
         client = self.client
@@ -70,7 +69,6 @@ class Client:
 
         try:
             buckets = client.list_buckets()
-            # print(buckets)
             result: list[str] = []
 
             for bucket in buckets:
@@ -108,7 +106,7 @@ class Client:
                 for obj in objects:
                     client.remove_object(bucket_name, obj.object_name)
 
-    async def get_download_url(self, bucket_name: str, object_key: str, expires_seconds: int = 3600) -> str:
+    async def get_download_url(self, bucket_name: str, object_key: str, encryption_key: SseCustomerKey, expires_seconds: int = 3600) -> str:
         client = self.client
 
         try:
@@ -119,7 +117,7 @@ class Client:
                 expires=timedelta(seconds=expires_seconds),
                 response_headers={
                     'response-content-type': 'application/octet-stream'},
-                extra_query_params=self.encryption_key.copy_headers(),
+                extra_query_params=encryption_key.copy_headers(),
             )
         except S3Error as error:
             print(f'Failed to generate download URL: {error.message}')
@@ -128,7 +126,7 @@ class Client:
                 detail=f'Failed to generate download URL: {error.message}'
             )
 
-    async def download_file(self, bucket_name: str, file_path: str, range_header: str = None) -> StreamingResponse:
+    async def download_file(self, bucket_name: str, file_path: str, encryption_key: SseCustomerKey, range_header: str = None) -> StreamingResponse:
         client = self.client
 
         try:
@@ -152,7 +150,7 @@ class Client:
                 obj = client.get_object(
                     bucket_name,
                     object_name=object_name,
-                    ssec=self.encryption_key,
+                    ssec=encryption_key,
                     offset=start,
                     length=end - start + 1
                 )
@@ -172,7 +170,7 @@ class Client:
                 obj = client.get_object(
                     bucket_name,
                     object_name=object_name,
-                    ssec=self.encryption_key
+                    ssec=encryption_key
                 )
                 return StreamingResponse(
                     obj,
@@ -186,7 +184,7 @@ class Client:
                 detail=f'Failed to generate download URL: {error.message}'
             )
 
-    async def copy_files(self, bucket_name: str, source_paths: list[str], destination_path: str):
+    async def copy_files(self, bucket_name: str, source_paths: list[str], destination_path: str, encryption_key: SseCustomerKey):
         client = self.client
 
         for source in source_paths:
@@ -204,8 +202,8 @@ class Client:
                             bucket_name=bucket_name,
                             object_name=destination_object_name,
                             source=CopySource(
-                                bucket_name, object_name, ssec=self.encryption_key),
-                            sse=self.encryption_key,
+                                bucket_name, object_name, ssec=encryption_key),
+                            sse=encryption_key,
                         )
                 except S3Error as error:
                     print(f"Failed copy folder '{prefix}': {error.message}")
@@ -222,8 +220,8 @@ class Client:
                         bucket_name=bucket_name,
                         object_name=destination_object_name,
                         source=CopySource(
-                            bucket_name, object_name, ssec=self.encryption_key),
-                        sse=self.encryption_key,
+                            bucket_name, object_name, ssec=encryption_key),
+                        sse=encryption_key,
                     )
                 except S3Error as error:
                     print(f"Failed copy file '{object_name}': {error.message}")
@@ -232,7 +230,7 @@ class Client:
                         detail=f"Failed copy file '{object_name}': {error.message}"
                     )
 
-    async def rename_file(self, bucket_name: str, path: str, new_name: str):
+    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey):
         client = self.client
 
         object_name = path.strip('/')
@@ -254,8 +252,8 @@ class Client:
                         bucket_name=bucket_name,
                         object_name=destination_object_name,
                         source=CopySource(
-                            bucket_name, object_name, ssec=self.encryption_key),
-                        sse=self.encryption_key,
+                            bucket_name, object_name, ssec=encryption_key),
+                        sse=encryption_key,
                     )
             except S3Error as error:
                 print(f"Failed copy folder '{prefix}': {error.message}")
@@ -268,9 +266,8 @@ class Client:
                 client.copy_object(
                     bucket_name=bucket_name,
                     object_name=new_object_name,
-                    source=CopySource(bucket_name, object_name,
-                                      ssec=self.encryption_key),
-                    sse=self.encryption_key,
+                    source=CopySource(bucket_name, object_name, ssec=encryption_key),
+                    sse=encryption_key,
                 )
             except S3Error as error:
                 print(f"Failed copy file '{object_name}': {error.message}")
@@ -281,46 +278,58 @@ class Client:
 
         await self.delete_files([path])
 
-    async def upload_file(self, bucket_name: str, file: UploadFile, path: str):
+    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey):
         client = self.client
 
         await asyncio.to_thread(client.put_object, bucket_name, path.strip(
-            '/') + '/' + file.filename, file.file, file.size, sse=self.encryption_key)
+            '/') + '/' + file.filename, file.file, file.size, sse=encryption_key)
 
-    async def new_folder(self, bucket_name: str, name: str, path: str):
+    async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey):
         client = self.client
         client.put_object(
-            bucket_name, f'{path.strip('/')}/{name}/NODATA', io.BytesIO(b''), 0, sse=self.encryption_key)
+            bucket_name, f'{path.strip('/')}/{name}/NODATA', io.BytesIO(b''), 0, sse=encryption_key)
 
 
 class CopyRequest(BaseModel):
     bucket: str
     sourcePaths: list[str]
     destinationPath: str
+    token: str
 
 
 class RenameRequest(BaseModel):
     bucket: str
     path: str
     newName: str
+    token: str
 
 
 class NewFolderRequest(BaseModel):
     bucket: str
     name: str
     path: str
+    token: str
 
 
-encryption_key = 'A26yaD0GAW+IDKLd5pHQDM+w6y0Ztu3zVe412j8Ff+o='
-minio = Client('play.min.io', access_key='minioadmin',
-               secret_key='minioadmin', encryption_key=encryption_key)
+app = FastAPI()
+security = HTTPBasic()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_credentials=True,
+    allow_headers=["*"]
+)
+web_sessions = WebSessionsBase()
 
-# print(asyncio.run(s3.get_files()))
+minio = Client('play.min.io', access_key='minioadmin', secret_key='minioadmin')
 
 
 @app.get('/')
-async def get_all_files(bucket: str) -> str:
-    return json.dumps(await minio.get_files(bucket))
+async def get_all_files(bucket: str, token: str) -> str:
+    hash1 = web_sessions.check_token(token[:22])
+    if hash1:
+        return json.dumps(await minio.get_files(bucket))
 
 
 @app.get('/buckets')
@@ -329,37 +338,94 @@ async def get_buckets() -> str:
 
 
 @app.get('/download')
-async def download(bucket: str, file: str, request: Request) -> StreamingResponse:
-    file = file.strip('/')
-    range_header = request.headers.get('Range')
-    return await minio.download_file(bucket, file, range_header)
+async def download(bucket: str, file: str, token: str, request: Request) -> StreamingResponse:
+    token, hash2 = token[:22], token[22:]
+    hash1 = web_sessions.check_token(token)
+    if hash1:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        file = file.strip('/')
+        range_header = request.headers.get('Range')
+        return await minio.download_file(bucket, file, SseCustomerKey(hash), range_header)
 
 
 @app.delete('/')
-async def delete(bucket: str, files: str):
-    await minio.delete_files(bucket, files.split('|'))
-    return True
+async def delete(bucket: str, files: str, token: str):
+    hash1 = web_sessions.check_token(token[:22])
+    if hash1:
+        await minio.delete_files(bucket, files.split('|'))
+        return True
 
 
 @app.post('/copy')
 async def copy(request: CopyRequest):
-    await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath)
-    return True
+    token, hash2 = request.token[:22], request.token[22:]
+    hash1 = web_sessions.check_token(token)
+    if hash1:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(hash))
+        return True
 
 
 @app.post('/rename')
 async def rename(request: RenameRequest):
-    await minio.rename_file(request.bucket, request.path, request.newName)
-    return True
+    token, hash2 = request.token[:22], request.token[22:]
+    hash1 = web_sessions.check_token(token)
+    if hash1:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(hash))
+        return True
 
 
 @app.post('/folder')
 async def folder(request: NewFolderRequest):
-    await minio.new_folder(request.bucket, request.name, request.path)
-    return True
+    token, hash2 = request.token[:22], request.token[22:]
+    hash1 = web_sessions.check_token(token)
+    if hash1:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(hash))
+        return True
 
 
 @app.put('/')
-async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()]):
-    await minio.upload_file(bucket, file, path)
-    return file.filename
+async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]):
+    token, hash2 = token[:22], token[22:]
+    hash1 = web_sessions.check_token(token)
+    if hash1:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        await minio.upload_file(bucket, file, path, SseCustomerKey(hash))
+        return file.filename
+
+
+@app.get('/auth')
+async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]):
+    correct_username = credentials.username == 'admin'
+    correct_password = credentials.password == 'password'
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=401,
+            detail='Incorrect username or password',
+            headers={'WWW-Authenticate': 'Basic'},
+        )
+    hash = hash_argon2_password(credentials.password, b']j235#4&')
+    token = secrets.token_urlsafe(16)
+    hash1, hash2 = hash_division(hash)
+    web_sessions.add_session(token, hash1)
+    hash2 = base64.urlsafe_b64encode(hash2).decode()
+
+    return {
+        'authenticated': True,
+        'token': token + hash2,
+    }
+
+
+@app.get('/check')
+async def auth(token: str):
+    token = token[:22]
+    if web_sessions.check_token(token):
+        return {'authenticated': True}
+    raise HTTPException(status_code=401, detail='Token not found')
