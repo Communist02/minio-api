@@ -17,12 +17,14 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sessions import WebSessionsBase
 from crypt import hash_argon2_password, hash_division, hash_reconstruct
 import secrets
+import urllib3
 
 
 class Client:
     def __init__(self, endpoint_url: str, access_key: str, secret_key: str):
+        http_client = urllib3.PoolManager(cert_reqs='CERT_NONE')
         self.client = Minio(
-            endpoint_url, access_key=access_key, secret_key=secret_key)
+            endpoint_url, access_key=access_key, secret_key=secret_key, secure=True, http_client=http_client)
 
     async def get_files(self, bucket_name) -> list[dict]:
         client = self.client
@@ -266,7 +268,8 @@ class Client:
                 client.copy_object(
                     bucket_name=bucket_name,
                     object_name=new_object_name,
-                    source=CopySource(bucket_name, object_name, ssec=encryption_key),
+                    source=CopySource(bucket_name, object_name,
+                                      ssec=encryption_key),
                     sse=encryption_key,
                 )
             except S3Error as error:
@@ -322,7 +325,8 @@ app.add_middleware(
 )
 web_sessions = WebSessionsBase()
 
-minio = Client('play.min.io', access_key='minioadmin', secret_key='minioadmin')
+minio = Client('localhost:9000', access_key='minioadmin',
+               secret_key='minioadmin')
 
 
 @app.get('/')
