@@ -6,12 +6,13 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import os
 from argon2.low_level import hash_secret_raw, Type
+from hashlib import sha256
 
 
-def hash_argon2_password(password: str, salt: bytes = os.urandom(16)) -> bytes:
+def hash_argon2_from_password(password: str) -> bytes:
     password_bytes = password.encode()
+    salt = sha256(password_bytes).digest()[:16]
 
-    # Apply Argon2id for password stretching
     hash = hash_secret_raw(
         secret=password_bytes,
         salt=salt,
@@ -35,24 +36,30 @@ def hash_reconstruct(part1: bytes, part2: bytes) -> bytes:
     return bytes(a ^ b for a, b in zip(part1, part2))
 
 
-def derive_key_pair_from_hash(hash: bytes) -> tuple[bytes, bytes, bytes]:
+def key_pair_from_hash(hash: bytes) -> tuple[bytes, bytes]:
+    """return pivate_key, public_key"""
     private_key = x25519.X25519PrivateKey.from_private_bytes(hash)
     public_key = private_key.public_key()
 
     return (
-        public_key.public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw
-        ),
         private_key.private_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PrivateFormat.Raw,
             encryption_algorithm=serialization.NoEncryption()
+        ),
+        public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
         )
     )
 
 
-def encrypt_key(secret_key: bytes, public_key: bytes) -> bytes:
+def random_key_pair() -> tuple[bytes, bytes]:
+    """return pivate_key, public_key"""
+    return key_pair_from_hash(secrets.token_bytes(32))
+
+
+def asym_encrypt_key(secret_key: bytes, public_key: bytes) -> bytes:
     """Encrypts a secret key using recipient's X25519 public key and AES-GCM."""
 
     # Генерируем временную (ephemeral) пару ключей
@@ -87,7 +94,7 @@ def encrypt_key(secret_key: bytes, public_key: bytes) -> bytes:
     return ephemeral_public_key + nonce + encryptor.tag + ciphertext
 
 
-def decrypt_key(encrypted_key: bytes, private_key: bytes) -> bytes:
+def asym_decrypt_key(encrypted_key: bytes, private_key: bytes) -> bytes:
     """Decrypts a secret key using X25519 private key and AES-GCM."""
 
     # Разбор компонентов из входных данных
@@ -119,3 +126,28 @@ def decrypt_key(encrypted_key: bytes, private_key: bytes) -> bytes:
         nonce, tag), backend=default_backend())
     decryptor = cipher.decryptor()
     return decryptor.update(ciphertext) + decryptor.finalize()
+
+
+def sym_encrypt_key(secret: bytes, aes_key: bytes) -> bytes:
+    assert len(secret) == 32
+    assert len(aes_key) == 32
+
+    nonce = os.urandom(16)
+    cipher = Cipher(algorithms.AES(aes_key), modes.CTR(
+        nonce), backend=default_backend())
+    encryptor = cipher.encryptor()
+    encrypted_key = encryptor.update(secret) + encryptor.finalize()
+    return nonce + encrypted_key
+
+
+def sym_decrypt_key(ciphertext: bytes, aes_key: bytes):
+    assert len(ciphertext) == 48
+    assert len(aes_key) == 32
+
+    nonce = ciphertext[:16]
+    encrypted_key = ciphertext[16:]
+
+    cipher = Cipher(algorithms.AES(aes_key), modes.CTR(
+        nonce), backend=default_backend())
+    decryptor = cipher.decryptor()
+    return decryptor.update(encrypted_key) + decryptor.finalize()

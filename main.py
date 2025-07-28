@@ -15,9 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sessions import WebSessionsBase
-from crypt import hash_argon2_password, hash_division, hash_reconstruct
+from database import MainBase
+from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
 import secrets
 import urllib3
+from minio.deleteobjects import DeleteObject
 
 
 class Client:
@@ -26,7 +28,7 @@ class Client:
         self.client = Minio(
             endpoint_url, access_key=access_key, secret_key=secret_key, secure=True, http_client=http_client)
 
-    async def get_files(self, bucket_name) -> list[dict]:
+    async def get_files(self, bucket_name: str) -> list[dict]:
         client = self.client
 
         try:
@@ -90,23 +92,42 @@ class Client:
     async def delete_files(self, bucket_name: str, paths: list[str]):
         client = self.client
 
-        for path in paths:
-            object_name = path.strip('/')
-            if not path.endswith('/'):
-                try:
-                    client.remove_object(bucket_name, object_name=object_name)
-                except S3Error as error:
-                    print(f'Error deleting files: {error.message}')
+        try:
+            objects_to_delete: list[DeleteObject] = []
+
+            for path in paths:
+                object_name = path.strip('/')
+
+                if not path.endswith('/'):
+                    objects_to_delete.append(DeleteObject(object_name))
+                else:
+                    objects = client.list_objects(
+                        bucket_name, prefix=object_name, recursive=True)
+                    objects_to_delete.extend(
+                        [DeleteObject(obj.object_name) for obj in objects]
+                    )
+
+            if objects_to_delete:
+                errors = await asyncio.to_thread(
+                    lambda: list(client.remove_objects(
+                        bucket_name, objects_to_delete))
+                )
+
+                if errors:
+                    error_list = [e.__dict__ for e in errors]
                     raise HTTPException(
                         status_code=500,
-                        detail={'error': 'Error deleting files',
-                                'message': error.message}
+                        detail={'error': 'Some files failed to delete',
+                                'errors': error_list}
                     )
-            else:
-                objects = client.list_objects(
-                    bucket_name, prefix=object_name, recursive=True)
-                for obj in objects:
-                    client.remove_object(bucket_name, obj.object_name)
+
+        except S3Error as error:
+            print(f'Error deleting files: {error.message}')
+            raise HTTPException(
+                status_code=500,
+                detail={'error': 'S3 error during delete',
+                        'message': error.message}
+            )
 
     async def get_download_url(self, bucket_name: str, object_key: str, encryption_key: SseCustomerKey, expires_seconds: int = 3600) -> str:
         client = self.client
@@ -131,12 +152,18 @@ class Client:
     async def download_file(self, bucket_name: str, file_path: str, encryption_key: SseCustomerKey, range_header: str = None) -> StreamingResponse:
         client = self.client
 
+        async def file_iterator(stream, chunk_size=1024 * 1024 * 4):
+            while True:
+                data = await asyncio.to_thread(stream.read, chunk_size)
+                if not data:
+                    break
+                yield data
+
         try:
             object_name = file_path.lstrip('/')
-            objects = client.list_objects(
-                bucket_name=bucket_name, prefix=object_name)
-            for obj in objects:
-                file_size = obj.size
+            stat = client.stat_object(
+                bucket_name, object_name, ssec=encryption_key)
+            file_size = stat.size
             headers = {
                 'Content-Disposition': f"attachment; filename*=UTF-8''{quote(object_name.split('/')[-1])}",
                 'Content-Length': str(file_size),
@@ -162,7 +189,7 @@ class Client:
                 headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
 
                 return StreamingResponse(
-                    obj,
+                    file_iterator(obj),
                     media_type='application/octet-stream',
                     headers=headers,
                     status_code=206  # Partial Content
@@ -175,7 +202,7 @@ class Client:
                     ssec=encryption_key
                 )
                 return StreamingResponse(
-                    obj,
+                    file_iterator(obj),
                     media_type='application/octet-stream',
                     headers=headers
                 )
@@ -284,13 +311,28 @@ class Client:
     async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey):
         client = self.client
 
-        await asyncio.to_thread(client.put_object, bucket_name, path.strip(
-            '/') + '/' + file.filename, file.file, file.size, sse=encryption_key)
+        await asyncio.to_thread(
+            client.put_object,
+            bucket_name=bucket_name,
+            object_name=path.strip('/') + '/' + file.filename,
+            data=file.file,
+            length=file.size,
+            sse=encryption_key,
+        )
 
     async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey):
         client = self.client
         client.put_object(
-            bucket_name, f'{path.strip('/')}/{name}/NODATA', io.BytesIO(b''), 0, sse=encryption_key)
+            bucket_name=bucket_name,
+            object_name=f'{path.strip('/')}/{name}/NODATA',
+            data=io.BytesIO(b''),
+            length=0,
+            sse=encryption_key,
+        )
+
+    async def create_bucket(self, bucket_name: str):
+        client = self.client
+        client.make_bucket(bucket_name)
 
 
 class CopyRequest(BaseModel):
@@ -324,6 +366,7 @@ app.add_middleware(
     allow_headers=["*"]
 )
 web_sessions = WebSessionsBase()
+database = MainBase()
 
 minio = Client('localhost:9000', access_key='minioadmin',
                secret_key='minioadmin')
@@ -331,94 +374,99 @@ minio = Client('localhost:9000', access_key='minioadmin',
 
 @app.get('/')
 async def get_all_files(bucket: str, token: str) -> str:
-    hash1 = web_sessions.check_token(token[:22])
-    if hash1:
+    if web_sessions.get_user_id(token[:32]):
         return json.dumps(await minio.get_files(bucket))
 
 
 @app.get('/buckets')
-async def get_buckets() -> str:
-    return json.dumps(await minio.get_buckets())
+async def get_buckets(token: str) -> str:
+    token = token[:32]
+    user_id = web_sessions.get_user_id(token)
+    # return json.dumps(await minio.get_buckets())
+    return json.dumps(database.get_collections(user_id))
 
 
 @app.get('/download')
 async def download(bucket: str, file: str, token: str, request: Request) -> StreamingResponse:
-    token, hash2 = token[:22], token[22:]
-    hash1 = web_sessions.check_token(token)
-    if hash1:
+    token, hash2 = token[:32], token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
+        key = database.get_collection_key(int(bucket), user_id, hash)
         file = file.strip('/')
         range_header = request.headers.get('Range')
-        return await minio.download_file(bucket, file, SseCustomerKey(hash), range_header)
+        return await minio.download_file(bucket, file, SseCustomerKey(key), range_header)
 
 
 @app.delete('/')
 async def delete(bucket: str, files: str, token: str):
-    hash1 = web_sessions.check_token(token[:22])
-    if hash1:
+    if web_sessions.get_user_id(token[:32]):
         await minio.delete_files(bucket, files.split('|'))
         return True
 
 
 @app.post('/copy')
 async def copy(request: CopyRequest):
-    token, hash2 = request.token[:22], request.token[22:]
-    hash1 = web_sessions.check_token(token)
-    if hash1:
+    token, hash2 = request.token[:32], request.token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
-        await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(hash))
+        key = database.get_collection_key(int(request.bucket), user_id, hash)
+        await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(key))
         return True
 
 
 @app.post('/rename')
 async def rename(request: RenameRequest):
-    token, hash2 = request.token[:22], request.token[22:]
-    hash1 = web_sessions.check_token(token)
-    if hash1:
+    token, hash2 = request.token[:32], request.token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
-        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(hash))
+        key = database.get_collection_key(int(request.bucket), user_id, hash)
+        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(key))
         return True
 
 
 @app.post('/folder')
 async def folder(request: NewFolderRequest):
-    token, hash2 = request.token[:22], request.token[22:]
-    hash1 = web_sessions.check_token(token)
-    if hash1:
+    token, hash2 = request.token[:32], request.token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
-        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(hash))
+        key = database.get_collection_key(int(request.bucket), user_id, hash)
+        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(key))
         return True
 
 
 @app.put('/')
 async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]):
-    token, hash2 = token[:22], token[22:]
-    hash1 = web_sessions.check_token(token)
-    if hash1:
+    token, hash2 = token[:32], token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
-        await minio.upload_file(bucket, file, path, SseCustomerKey(hash))
+        key = database.get_collection_key(int(bucket), user_id, hash)
+        await minio.upload_file(bucket, file, path, SseCustomerKey(key))
         return file.filename
 
 
 @app.get('/auth')
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]):
-    correct_username = credentials.username == 'admin'
-    correct_password = credentials.password == 'password'
-    if not (correct_username and correct_password):
+    user_id = database.get_user_id(credentials.username, credentials.password)
+    if not user_id:
         raise HTTPException(
             status_code=401,
             detail='Incorrect username or password',
             headers={'WWW-Authenticate': 'Basic'},
         )
-    hash = hash_argon2_password(credentials.password, b']j235#4&')
-    token = secrets.token_urlsafe(16)
+    hash = hash_argon2_from_password(credentials.password)
+    token = secrets.token_urlsafe(24)[:32]
     hash1, hash2 = hash_division(hash)
-    web_sessions.add_session(token, hash1)
+    web_sessions.add_session(token, hash1, user_id)
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
     return {
@@ -428,8 +476,17 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]):
 
 
 @app.get('/check')
-async def auth(token: str):
-    token = token[:22]
-    if web_sessions.check_token(token):
+async def check(token: str):
+    if web_sessions.get_user_id(token[:32]):
         return {'authenticated': True}
     raise HTTPException(status_code=401, detail='Token not found')
+
+
+@app.get('/registration')
+async def registration(login: str, password: str):
+    database.add_user(login, password)
+
+
+@app.get('/add-collection')
+async def add_collection(name: str, user_id: int):
+    await minio.create_bucket(f'{database.add_collection(name, user_id):03}')
