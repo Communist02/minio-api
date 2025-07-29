@@ -35,7 +35,7 @@ class Project(Base):
     public_key = Column(BINARY(32), nullable=False)
 
 
-class GrantType(Base):
+class AccessType(Base):
     __tablename__ = 'grant_types'
 
     id = Column(INT, primary_key=True)
@@ -49,13 +49,13 @@ class ResourceType(Base):
     name = Column(VARCHAR(20), nullable=False)
 
 
-class CollectionGrant(Base):
-    __tablename__ = 'collection_grants'
+class AccessCollections(Base):
+    __tablename__ = 'access_collections'
 
     id = Column(INT, primary_key=True, autoincrement=True)
     collection_id = Column(INT, nullable=False)
     encrypted_key = Column(BINARY(92), nullable=False)
-    type_id = Column(ForeignKey(GrantType.id), nullable=False)
+    # type_id = Column(ForeignKey(AccessType.id), nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=False)
     project_id = Column(ForeignKey(Project.id), nullable=True)
 
@@ -67,7 +67,7 @@ class Collection(Base):
     name = Column(VARCHAR(255), nullable=False)
     encrypted_key = Column(BINARY(92), nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=True)
-    owner_id = Column(ForeignKey(CollectionGrant.id), nullable=True)
+    owner_id = Column(ForeignKey(AccessCollections.id), nullable=True)
     resource_type_id = Column(ForeignKey(ResourceType.id), nullable=True)
 
 
@@ -102,7 +102,8 @@ class MainBase:
         encrypted_private_key = crypt.sym_encrypt_key(private_key, hash)
 
         with Session(self.engine) as session:
-            query = insert(User).values(login=login, encrypted_private_key=encrypted_private_key, public_key=public_key, password_hash=hash)
+            query = insert(User).values(
+                login=login, encrypted_private_key=encrypted_private_key, public_key=public_key, password_hash=hash)
             session.execute(query)
             session.commit()
 
@@ -134,7 +135,7 @@ class MainBase:
     def get_user_id(self, login: str, password: str) -> int:
         with Session(self.engine) as session:
             query = select(User.id).where(User.login == login)
-            user_id = session.execute(query).scalar_one()
+            user_id = session.execute(query).scalar()
             return user_id
 
     def get_collections(self, user_id: int) -> list:
@@ -144,5 +145,31 @@ class MainBase:
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(f'{collection[0]:03}')
+            return result
 
+    def get_access_collections(self, user_id: int) -> list:
+        result = []
+        with Session(self.engine) as session:
+            query = select(AccessCollections.collection_id).where(AccessCollections.user_id == user_id)
+            collections = session.execute(query).all()
+            for collection in collections:
+                result.append(f'{collection[0]:03}')
+            return result
+
+    def get_public_key(self, user_id: int) -> bytes:
+        with Session(self.engine) as session:
+            query = select(User.public_key).where(User.id == user_id)
+            return session.execute(query).scalar_one()
+
+    def give_access(self, collection_id: int, owner_user_id: int, access_user_id: int, key: bytes) -> int:
+        collection_key = self.get_collection_key(
+            collection_id, owner_user_id, key)
+        public_key = self.get_public_key(access_user_id)
+        encrypted_key = crypt.asym_encrypt_key(collection_key, public_key)
+
+        with Session(self.engine) as session:
+            query = insert(AccessCollections).values(collection_id=collection_id,
+                                                    user_id=access_user_id, encrypted_key=encrypted_key).returning(AccessCollections.id)
+            result = session.execute(query).scalar_one()
+            session.commit()
             return result

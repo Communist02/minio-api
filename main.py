@@ -368,7 +368,7 @@ app.add_middleware(
 web_sessions = WebSessionsBase()
 database = MainBase()
 
-minio = Client('localhost:9000', access_key='minioadmin',
+minio = Client('play.min.io', access_key='minioadmin',
                secret_key='minioadmin')
 
 
