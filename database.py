@@ -1,3 +1,4 @@
+import cryptography
 from sqlalchemy import DATE, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
@@ -126,10 +127,16 @@ class MainBase:
                 User.id == user_id)
             encrypted_private_key = session.execute(query).scalar_one()
             private_key = crypt.sym_decrypt_key(encrypted_private_key, key)
-            query = select(Collection.encrypted_key).where(
-                Collection.id == collection_id)
-            encrypted_key = session.execute(query).scalar_one()
-            collection_key = crypt.asym_decrypt_key(encrypted_key, private_key)
+            try:
+                query = select(Collection.encrypted_key).where(
+                    Collection.id == collection_id)
+                encrypted_key = session.execute(query).scalar_one()
+                collection_key = crypt.asym_decrypt_key(encrypted_key, private_key)
+            except cryptography.exceptions.InvalidTag:
+                query = select(AccessCollections.encrypted_key).where(
+                    AccessCollections.collection_id == collection_id)
+                encrypted_key = session.execute(query).scalar_one()
+                collection_key = crypt.asym_decrypt_key(encrypted_key, private_key)
             return collection_key
 
     def get_user_id(self, login: str, password: str) -> int:
@@ -145,7 +152,7 @@ class MainBase:
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(f'{collection[0]:03}')
-            return result
+            return result + self.get_access_collections(user_id)
 
     def get_access_collections(self, user_id: int) -> list:
         result = []

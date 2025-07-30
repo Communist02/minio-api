@@ -490,3 +490,13 @@ async def registration(login: str, password: str):
 @app.get('/add-collection')
 async def add_collection(name: str, user_id: int):
     await minio.create_bucket(f'{database.add_collection(name, user_id):03}')
+
+
+@app.post('/give_access')
+async def give_access(token: str, bucket: str, access_user_id: int):
+    token, hash2 = token[:32], token[32:]
+    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    if user_id:
+        hash2 = base64.urlsafe_b64decode(hash2.encode())
+        hash = hash_reconstruct(hash1, hash2)
+        database.give_access(int(bucket), user_id, access_user_id, hash)
