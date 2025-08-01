@@ -20,6 +20,8 @@ from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
 import secrets
 import urllib3
 from minio.deleteobjects import DeleteObject
+import config
+from ldap import LDAPManager
 
 
 class Client:
@@ -332,7 +334,15 @@ class Client:
 
     async def create_bucket(self, bucket_name: str):
         client = self.client
-        client.make_bucket(bucket_name)
+
+        try:
+            client.make_bucket(bucket_name)
+        except S3Error as error:
+            print(f"Failed create bucket '{bucket_name}': {error.message}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed create bucket '{bucket_name}': {error.message}"
+            )
 
 
 class CopyRequest(BaseModel):
@@ -367,9 +377,10 @@ app.add_middleware(
 )
 web_sessions = WebSessionsBase()
 database = MainBase()
+ldap = LDAPManager()
 
-minio = Client('play.min.io', access_key='minioadmin',
-               secret_key='minioadmin')
+minio = Client(config.url, access_key=config.access_key,
+               secret_key=config.secret_key)
 
 
 @app.get('/')
@@ -456,8 +467,13 @@ async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotat
 
 @app.get('/auth')
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]):
-    user_id = database.get_user_id(credentials.username, credentials.password)
-    if not user_id:
+    user_id = ldap.auth(credentials.username, credentials.password)
+    if user_id is not None:
+        user_id_db = database.get_user_id(credentials.username)
+        if user_id_db is None:
+            database.add_user(user_id, credentials.username, credentials.password)
+        # Надо добавить если не совпадают id
+    else:
         raise HTTPException(
             status_code=401,
             detail='Incorrect username or password',
@@ -487,9 +503,10 @@ async def registration(login: str, password: str):
     database.add_user(login, password)
 
 
-@app.get('/add-collection')
-async def add_collection(name: str, user_id: int):
-    await minio.create_bucket(f'{database.add_collection(name, user_id):03}')
+@app.get('/create-collection')
+async def create_collection(name: str, user_id: int):
+    user_id = database.create_collection(name, user_id)
+    await minio.create_bucket(f'{user_id:03}')
 
 
 @app.post('/give_access')
@@ -499,4 +516,4 @@ async def give_access(token: str, bucket: str, access_user_id: int):
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         hash = hash_reconstruct(hash1, hash2)
-        database.give_access(int(bucket), user_id, access_user_id, hash)
+        database.give_access_user_to_collection(int(bucket), user_id, access_user_id, hash)

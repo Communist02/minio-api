@@ -4,3 +4,4 @@ cryptography
 argon2-cffi
 SQLAlchemy
 pymysql
+ldap3
