@@ -149,19 +149,18 @@ class MainBase:
         with Session(self.engine) as session:
             user_private_key = self.get_user_private_key(user_id, key)
             try:
-                if isinstance(collection_id, int):
-                    query = select(Collection.encrypted_key).where(
-                        Collection.id == collection_id)
-                else:
-                    query = select(Collection.encrypted_key).where(
-                        Collection.name == collection_id)
+                if not isinstance(collection_id, int):
+                    query = select(Collection.id).where(Collection.name == collection_id)
+                    collection_id = session.execute(query).scalar_one()
+                query = select(Collection.encrypted_key).where(
+                    Collection.id == collection_id)
                 encrypted_key = session.execute(query).scalar_one()
                 collection_key = crypt.asym_decrypt_key(
                     encrypted_key, user_private_key)
             except cryptography.exceptions.InvalidTag:
                 try:
                     query = select(AccessToCollection.encrypted_key).where(
-                        AccessToCollection.collection_id == collection_id)
+                        (AccessToCollection.collection_id == collection_id) & (AccessToCollection.user_id == user_id))
                     encrypted_key = session.execute(query).scalar_one()
                     collection_key = crypt.asym_decrypt_key(
                         encrypted_key, user_private_key)
@@ -178,7 +177,8 @@ class MainBase:
                     print(result)
                     encrypted_key = result[0][0]
                     group_id = result[0][1]
-                    group_private_key = self.get_group_private_key(group_id, user_id, key)
+                    group_private_key = self.get_group_private_key(
+                        group_id, user_id, key)
                     collection_key = crypt.asym_decrypt_key(
                         encrypted_key, group_private_key)
             return collection_key
@@ -203,20 +203,23 @@ class MainBase:
     def get_collections(self, user_id: int) -> list:
         result = []
         with Session(self.engine) as session:
-            query = select(Collection.id, Collection.name).where(Collection.user_id == user_id)
+            query = select(Collection.id, Collection.name).where(
+                Collection.user_id == user_id)
             collections = session.execute(query).all()
             for collection in collections:
-                result.append({'id': collection[0], 'name': collection[1], 'type': 'person'})
+                result.append(
+                    {'id': collection[0], 'name': collection[1], 'type': 'person'})
             return result + self.get_collections_accessed(user_id) + self.get_group_collections(user_id)
 
     def get_collections_accessed(self, user_id: int) -> list:
         result = []
         with Session(self.engine) as session:
             query = select(AccessToCollection.collection_id, Collection.name).where(
-                AccessToCollection.user_id == user_id)
+                (AccessToCollection.user_id == user_id) & (Collection.id == AccessToCollection.collection_id))
             collections = session.execute(query).all()
             for collection in collections:
-                result.append({'id': collection[0], 'name': collection[1], 'type': 'access'})
+                result.append(
+                    {'id': collection[0], 'name': collection[1], 'type': 'access'})
             return result
 
     def get_group_collections(self, user_id: int) -> list:
@@ -232,7 +235,8 @@ class MainBase:
                 AccessToCollection.group_id.in_(groups))
             collections = session.execute(query).all()
             for collection in collections:
-                result.append({'id': collection[0], 'name': collection[1], 'type': 'group'})
+                result.append(
+                    {'id': collection[0], 'name': collection[1], 'type': 'group'})
             return result
 
     def get_user_public_key(self, user_id: int) -> bytes:
@@ -288,31 +292,47 @@ class MainBase:
 
     def delete_user_to_group(self, group_id: int, user_id: int):
         with Session(self.engine) as session:
-            query = delete(GroupUser).where(GroupUser.user_id ==
-                                            user_id & GroupUser.group_id == group_id)
+            query = delete(GroupUser).where((GroupUser.user_id ==
+                                            user_id) & (GroupUser.group_id == group_id))
             session.execute(query)
             session.commit()
 
     def delete_access_user_to_collection(self, collection_id: int, user_id: int):
         with Session(self.engine) as session:
             query = delete(AccessToCollection).where(
-                AccessToCollection.user_id == user_id & AccessToCollection.collection_id == collection_id)
+                (AccessToCollection.user_id == user_id) & (AccessToCollection.collection_id == collection_id))
             session.execute(query)
             session.commit()
 
     def delete_access_group_to_collection(self, group_id: int, user_id: int):
         with Session(self.engine) as session:
             query = delete(AccessToCollection).where(
-                AccessToCollection.user_id == user_id & AccessToCollection.group_id == group_id)
+                (AccessToCollection.user_id == user_id) & (AccessToCollection.group_id == group_id))
             session.execute(query)
             session.commit()
 
-    def get_groups(self, user_id: int):
+    def get_groups(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(GroupUser.group_id, Group.title).where(
-                GroupUser.user_id == user_id)
-            groups_result = session.execute(query).all()
+            query = select(Group.id, Group.title).where(
+                (GroupUser.user_id == user_id) & (GroupUser.group_id == Group.id))
+            result = session.execute(query).all()
             groups = []
-            for group in groups_result:
+            for group in result:
                 groups.append({'id': group[0], 'title': group[1]})
             return groups
+
+    def remove_collection(self, collection_name: str, user_id: int):
+        with Session(self.engine) as session:
+            query = delete(Collection).where(
+                (Collection.name == collection_name) & (Collection.user_id == user_id))
+            session.execute(query)
+            session.commit()
+
+    def get_other_users(self, user_id: int) -> list:
+        with Session(self.engine) as session:
+            query = select(User.id, User.login).where(User.id != user_id)
+            result = session.execute(query).all()
+            users = []
+            for user in result:
+                users.append({'id': user[0], 'login': user[1]})
+            return users
