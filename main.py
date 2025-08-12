@@ -1,21 +1,17 @@
 import asyncio
 import base64
-from datetime import timedelta
 import io
 from typing import Annotated
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
 from minio.commonconfig import CopySource
-from minio.credentials import AssumeRoleProvider
 from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, Request
 from fastapi.responses import StreamingResponse
-import json
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from requests import session
 from sessions import WebSessionsBase
 from database import MainBase
 from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
@@ -34,7 +30,7 @@ class Client:
             endpoint, access_key=access_key, secret_key=secret_key, secure=True, cert_check=False)
 
     async def get_files(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str) -> list[dict]:
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         try:
@@ -75,7 +71,7 @@ class Client:
             )
 
     async def get_buckets(self, access_key: str, secret_key: str, sts_token: str) -> list[str]:
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         try:
@@ -97,7 +93,7 @@ class Client:
             )
 
     async def delete_files(self, bucket_name: str, paths: list[str], access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         try:
@@ -158,7 +154,7 @@ class Client:
     #         )
 
     async def download_file(self, bucket_name: str, file_path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, range_header: str = None) -> StreamingResponse:
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         async def file_iterator(stream, chunk_size=1024 * 1024 * 4):
@@ -191,12 +187,10 @@ class Client:
         }
         try:
             if range_header:
-                # Парсим заголовок Range (формат "bytes=start-end")
                 start_end = range_header.replace('bytes=', '').split('-')
                 start = int(start_end[0])
                 end = int(start_end[1]) if start_end[1] else file_size - 1
 
-                # Получаем только запрошенный диапазон байтов
                 obj = client.get_object(
                     bucket_name,
                     object_name=object_name,
@@ -205,7 +199,6 @@ class Client:
                     length=end - start + 1
                 )
 
-                # Устанавливаем соответствующие заголовки для частичного контента
                 headers['Content-Length'] = str(end - start + 1)
                 headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
 
@@ -216,7 +209,6 @@ class Client:
                     status_code=206  # Partial Content
                 )
             else:
-                # Полный файл, если нет заголовка Range
                 obj = client.get_object(
                     bucket_name,
                     object_name=object_name,
@@ -235,7 +227,7 @@ class Client:
             )
 
     async def copy_files(self, bucket_name: str, source_paths: list[str], destination_path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         for source in source_paths:
@@ -281,8 +273,9 @@ class Client:
                         detail=f"Failed copy file '{object_name}': {error.message}"
                     )
 
-    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey):
-        client = self.client
+    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
+        client = Minio(self.endpoint, access_key, secret_key,
+                       sts_token, secure=True, cert_check=self.cert_check)
 
         object_name = path.strip('/')
         new_object_name = object_name[:-
@@ -328,10 +321,11 @@ class Client:
                     detail=f"Failed copy file '{object_name}': {error.message}"
                 )
 
-        await self.delete_files([path])
+        await self.delete_files(bucket_name, [path], access_key, secret_key, sts_token)
 
-    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey):
-        client = self.client
+    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
+        client = Minio(self.endpoint, access_key, secret_key,
+                       sts_token, secure=True, cert_check=self.cert_check)
 
         await asyncio.to_thread(
             client.put_object,
@@ -342,8 +336,10 @@ class Client:
             sse=encryption_key,
         )
 
-    async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey):
-        client = self.client
+    async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
+        client = Minio(self.endpoint, access_key, secret_key,
+                       sts_token, secure=True, cert_check=self.cert_check)
+
         client.put_object(
             bucket_name=bucket_name,
             object_name=f'{path.strip('/')}/{name}/NODATA',
@@ -353,7 +349,7 @@ class Client:
         )
 
     async def create_bucket(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint,  access_key, secret_key,
+        client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
         try:
             client.make_bucket(bucket_name)
@@ -363,6 +359,24 @@ class Client:
                 status_code=500,
                 detail=f"Failed create bucket '{bucket_name}': {error.message}"
             )
+
+    async def remove_bucket(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str):
+        client = Minio(self.endpoint, access_key, secret_key,
+                       sts_token, secure=True, cert_check=self.cert_check)
+        try:
+            client.remove_bucket(bucket_name)
+        except S3Error as error:
+            print(f"Failed remove bucket '{bucket_name}': {error.message}")
+            if error.code == 'BucketNotEmpty':
+                raise HTTPException(
+                    status_code=406,
+                    detail=f"Failed remove bucket '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed remove bucket '{bucket_name}': {error.message}"
+                )
 
 
 class CopyRequest(BaseModel):
@@ -400,6 +414,18 @@ class CreateGroupRequest(BaseModel):
 class GiveAccessUserToCollectionRequest(BaseModel):
     token: str
     collection_id: int
+    user_id: int
+
+
+class GiveAccessGroupToCollectionRequest(BaseModel):
+    token: str
+    collection_id: int
+    group_id: int
+
+
+class AddUserToGroupRequest(BaseModel):
+    token: str
+    group_id: int
     user_id: int
 
 
@@ -458,7 +484,7 @@ async def delete(bucket: str, files: str, token: str):
 @app.post('/copy')
 async def copy(request: CopyRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    session = web_sessions.get_session(token[:32])
+    session = web_sessions.get_session(token)
     if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(session['hash1'], hash2)
@@ -470,36 +496,36 @@ async def copy(request: CopyRequest):
 @app.post('/rename')
 async def rename(request: RenameRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = web_sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
+        key = hash_reconstruct(session['hash1'], hash2)
         collection_key = database.get_collection_key(
-            request.bucket, user_id, key)
-        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key))
+            request.bucket, session['user_id'], key)
+        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
 
 
 @app.post('/folder')
 async def folder(request: NewFolderRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = web_sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
+        key = hash_reconstruct(session['hash1'], hash2)
         collection_key = database.get_collection_key(
-            request.bucket, user_id, key)
-        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key))
+            request.bucket, session['user_id'], key)
+        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
 
 
 @app.put('/')
 async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]) -> str | None:
     token, hash2 = token[:32], token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = web_sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
-        collection_key = database.get_collection_key(bucket, user_id, key)
-        await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key))
+        key = hash_reconstruct(session['hash1'], hash2)
+        collection_key = database.get_collection_key(bucket, session['user_id'], key)
+        await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         return file.filename
 
 
@@ -575,24 +601,25 @@ async def create_group(request: CreateGroupRequest):
 
 
 @app.post('/give_access_group_to_collection')
-async def give_access_group_to_collection(token: str, collection_id: int, group_id: int):
-    token, hash2 = token[:32], token[32:]
+async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
+    token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
         database.give_access_group_to_collection(
-            collection_id, user_id, group_id, key)
+            request.collection_id, user_id, request.group_id, key)
 
 
 @app.post('/add_user_to_group')
-async def add_user_to_group(token: str, group_id: int, new_user_id: int):
-    token, hash2 = token[:32], token[32:]
+async def add_user_to_group(request: AddUserToGroupRequest):
+    token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
-        database.add_user_to_group(group_id, user_id, new_user_id, key)
+        database.add_user_to_group(
+            request.group_id, user_id, request.user_id, key)
 
 
 @app.get('/get_groups')
@@ -606,7 +633,8 @@ async def get_groups(token: str) -> list | None:
 async def remove_collection(token: str, collection: str):
     session = web_sessions.get_session(token[:32])
     if session:
-        return database.remove_collection(collection, session['user_id'])
+        await minio.remove_bucket(collection, session['access_key'], session['secret_key'], session['sts_token'])
+        database.remove_collection(collection, session['user_id'])
 
 
 @app.get('/get_other_users')
@@ -614,3 +642,24 @@ async def get_other_users(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_other_users(user_id)
+
+
+@app.get('/get_access_to_collection')
+async def get_access_to_collection(token: str, collection_id: int) -> list | None:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.get_access_to_collection(collection_id)
+
+
+@app.delete('/delete_access_to_collection')
+async def delete_access_to_collection(token: str, access_id: int) -> list | None:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.delete_access_to_collection(access_id)
+
+
+@app.get('/get_group_users')
+async def get_group_users(token: str, group_id: int) -> list | None:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.get_group_users(group_id)

@@ -1,3 +1,4 @@
+from os import access
 import cryptography
 from sqlalchemy import VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, delete
 from sqlalchemy.orm import DeclarativeBase, Session
@@ -150,7 +151,8 @@ class MainBase:
             user_private_key = self.get_user_private_key(user_id, key)
             try:
                 if not isinstance(collection_id, int):
-                    query = select(Collection.id).where(Collection.name == collection_id)
+                    query = select(Collection.id).where(
+                        Collection.name == collection_id)
                     collection_id = session.execute(query).scalar_one()
                 query = select(Collection.encrypted_key).where(
                     Collection.id == collection_id)
@@ -231,8 +233,8 @@ class MainBase:
             groups = []
             for group in groups_result:
                 groups.append(group[0])
-            query = select(AccessToCollection.collection_id, Collection.name).where(
-                AccessToCollection.group_id.in_(groups))
+            query = select(AccessToCollection.collection_id, Collection.name).where(AccessToCollection.group_id.in_(
+                groups) & (Collection.id == AccessToCollection.collection_id) & (Collection.user_id != user_id))
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(
@@ -323,14 +325,48 @@ class MainBase:
 
     def remove_collection(self, collection_name: str, user_id: int):
         with Session(self.engine) as session:
-            query = delete(Collection).where(
-                (Collection.name == collection_name) & (Collection.user_id == user_id))
+            query = select(Collection.id).where((Collection.name == collection_name) & (Collection.user_id == user_id))
+            collection_id = session.execute(query).scalar_one()
+            query = delete(AccessToCollection).where(AccessToCollection.collection_id == collection_id)
+            session.execute(query)
+            query = delete(Collection).where(Collection.id == collection_id)
             session.execute(query)
             session.commit()
 
     def get_other_users(self, user_id: int) -> list:
         with Session(self.engine) as session:
             query = select(User.id, User.login).where(User.id != user_id)
+            result = session.execute(query).all()
+            users = []
+            for user in result:
+                users.append({'id': user[0], 'login': user[1]})
+            return users
+
+    def get_access_to_collection(self, collection_id: int):
+        with Session(self.engine) as session:
+            query = select(AccessToCollection.id, AccessToCollection.user_id, User.login, AccessToCollection.group_id, Group.title).where(
+                AccessToCollection.collection_id == collection_id).outerjoin(User, AccessToCollection.user_id == User.id).outerjoin(Group, AccessToCollection.group_id == Group.id)
+            result = session.execute(query).all()
+            list_access = []
+            for access in result:
+                if access[1] is None:
+                    list_access.append(
+                        {'id': access[0], 'target_id': access[3], 'target_name': access[4], 'target_type': 'group'})
+                else:
+                    list_access.append(
+                        {'id': access[0], 'target_id': access[1], 'target_name': access[2], 'target_type': 'user'})
+            return list_access
+
+    def delete_access_to_collection(self, id):
+        with Session(self.engine) as session:
+            query = delete(AccessToCollection).where(
+                AccessToCollection.id == id)
+            session.execute(query)
+            session.commit()
+
+    def get_group_users(self, group_id) -> list:
+        with Session(self.engine) as session:
+            query = select(GroupUser.user_id, User.login).where(GroupUser.group_id == group_id).outerjoin(User, GroupUser.user_id == User.id)
             result = session.execute(query).all()
             users = []
             for user in result:
