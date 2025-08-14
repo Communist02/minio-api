@@ -23,11 +23,9 @@ from get_token import get_sts_token
 
 
 class Client:
-    def __init__(self, endpoint: str, access_key: str, secret_key: str):
+    def __init__(self, endpoint: str):
         self.endpoint = endpoint
         self.cert_check = False
-        self.client = Minio(
-            endpoint, access_key=access_key, secret_key=secret_key, secure=True, cert_check=False)
 
     async def get_files(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str) -> list[dict]:
         client = Minio(self.endpoint, access_key, secret_key,
@@ -415,12 +413,14 @@ class GiveAccessUserToCollectionRequest(BaseModel):
     token: str
     collection_id: int
     user_id: int
+    access_type_id: int
 
 
 class GiveAccessGroupToCollectionRequest(BaseModel):
     token: str
     collection_id: int
     group_id: int
+    access_type_id: int
 
 
 class AddUserToGroupRequest(BaseModel):
@@ -442,25 +442,24 @@ web_sessions = WebSessionsBase()
 database = MainBase()
 ldap = LDAPManager()
 
-minio = Client(config.url, access_key=config.access_key,
-               secret_key=config.secret_key)
+minio = Client(config.url)
 
 
-@app.get('/')
+@app.get('/') # access-
 async def get_list_files(bucket: str, token: str) -> list | None:
     session = web_sessions.get_session(token[:32])
     if session:
         return await minio.get_files(bucket, session['access_key'], session['secret_key'], session['sts_token'])
 
 
-@app.get('/get_list_collections')
+@app.get('/get_list_collections') # access-
 async def get_list_collections(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_collections(user_id)
 
 
-@app.get('/download')
+@app.get('/download') # access-
 async def download(bucket: str, file: str, token: str, request: Request) -> StreamingResponse:
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
@@ -474,14 +473,14 @@ async def download(bucket: str, file: str, token: str, request: Request) -> Stre
         return await minio.download_file(bucket, file, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
 
 
-@app.delete('/')
+@app.delete('/') # access-
 async def delete(bucket: str, files: str, token: str):
     session = web_sessions.get_session(token[:32])
     if session:
         await minio.delete_files(bucket, files.split('|'), session['access_key'], session['secret_key'], session['sts_token'])
 
 
-@app.post('/copy')
+@app.post('/copy') # access-
 async def copy(request: CopyRequest):
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
@@ -493,7 +492,7 @@ async def copy(request: CopyRequest):
         await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
 
 
-@app.post('/rename')
+@app.post('/rename') # access-
 async def rename(request: RenameRequest):
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
@@ -505,8 +504,8 @@ async def rename(request: RenameRequest):
         await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
 
 
-@app.post('/folder')
-async def folder(request: NewFolderRequest):
+@app.post('/new_folder') # access-
+async def new_folder(request: NewFolderRequest):
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
@@ -517,19 +516,20 @@ async def folder(request: NewFolderRequest):
         await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
 
 
-@app.put('/')
-async def upload(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]) -> str | None:
+@app.put('/')  # access-
+async def upload_file(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]) -> str | None:
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(bucket, session['user_id'], key)
+        collection_key = database.get_collection_key(
+            bucket, session['user_id'], key)
         await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         return file.filename
 
 
-@app.get('/auth')
+@app.get('/auth')  # safe +
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
     user_id = ldap.auth(credentials.username, credentials.password)
     if user_id is not None:
@@ -537,7 +537,8 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         if user_id_db is None:
             database.add_user(user_id, credentials.username,
                               credentials.password)
-        # Надо добавить если не совпадают id
+        elif user_id != user_id_db:
+            pass  # Надо сделать обработку такого события
     else:
         raise HTTPException(
             status_code=401,
@@ -560,7 +561,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     }
 
 
-@app.get('/check')
+@app.get('/check_token')  # safe+
 async def check(token: str) -> dict[str, int | bool]:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
@@ -568,12 +569,12 @@ async def check(token: str) -> dict[str, int | bool]:
     raise HTTPException(status_code=401, detail='Token not found')
 
 
-@app.get('/registration')
+@app.get('/registration')  # develop
 async def registration(login: str, password: str):
     database.add_user(login, password)
 
 
-@app.post('/create_collection')
+@app.post('/create_collection')  # safe+
 async def create_collection(request: CreateCollectionRequest):
     session = web_sessions.get_session(request.token[:32])
     if session:
@@ -581,7 +582,7 @@ async def create_collection(request: CreateCollectionRequest):
         return database.create_collection(request.name, session['user_id'])
 
 
-@app.post('/give_access_user_to_collection')
+@app.post('/give_access_user_to_collection')  # safe+ access-
 async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
@@ -589,10 +590,10 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
         database.give_access_user_to_collection(
-            request.collection_id, user_id, request.user_id, key)
+            request.collection_id, user_id, request.user_id, request.access_type_id, key)
 
 
-@app.post('/create_group')
+@app.post('/create_group')  # safe+
 async def create_group(request: CreateGroupRequest):
     token = request.token[:32]
     user_id = web_sessions.get_user_id(token)
@@ -600,7 +601,7 @@ async def create_group(request: CreateGroupRequest):
         database.create_group(user_id, request.title, request.description)
 
 
-@app.post('/give_access_group_to_collection')
+@app.post('/give_access_group_to_collection')  # safe+ access-
 async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
@@ -608,10 +609,10 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
         database.give_access_group_to_collection(
-            request.collection_id, user_id, request.group_id, key)
+            request.collection_id, user_id, request.group_id, request.access_type_id, key)
 
 
-@app.post('/add_user_to_group')
+@app.post('/add_user_to_group')  # safe+ access-
 async def add_user_to_group(request: AddUserToGroupRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
@@ -622,14 +623,14 @@ async def add_user_to_group(request: AddUserToGroupRequest):
             request.group_id, user_id, request.user_id, key)
 
 
-@app.get('/get_groups')
+@app.get('/get_groups')  # safe+
 async def get_groups(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_groups(user_id)
 
 
-@app.delete('/remove_collection')
+@app.delete('/remove_collection')  # safe+
 async def remove_collection(token: str, collection: str):
     session = web_sessions.get_session(token[:32])
     if session:
@@ -637,29 +638,36 @@ async def remove_collection(token: str, collection: str):
         database.remove_collection(collection, session['user_id'])
 
 
-@app.get('/get_other_users')
+@app.get('/get_other_users')  # safe+
 async def get_other_users(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_other_users(user_id)
 
 
-@app.get('/get_access_to_collection')
+@app.get('/get_access_to_collection')  # safe+
 async def get_access_to_collection(token: str, collection_id: int) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        return database.get_access_to_collection(collection_id)
+        return database.get_access_to_collection(collection_id, user_id)
 
 
-@app.delete('/delete_access_to_collection')
+@app.delete('/delete_access_to_collection')  # safe+
 async def delete_access_to_collection(token: str, access_id: int) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        return database.delete_access_to_collection(access_id)
+        return database.delete_access_to_collection(access_id, user_id)
 
 
-@app.get('/get_group_users')
+@app.get('/get_group_users')  # safe+
 async def get_group_users(token: str, group_id: int) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        return database.get_group_users(group_id)
+        return database.get_group_users(group_id, user_id)
+
+
+@app.get('/get_access_types')  # safe+
+async def get_access_types(token: str) -> list | None:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.get_access_types()
