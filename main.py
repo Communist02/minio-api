@@ -427,6 +427,7 @@ class AddUserToGroupRequest(BaseModel):
     token: str
     group_id: int
     user_id: int
+    role_id: int
 
 
 app = FastAPI()
@@ -620,7 +621,7 @@ async def add_user_to_group(request: AddUserToGroupRequest):
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
         database.add_user_to_group(
-            request.group_id, user_id, request.user_id, key)
+            request.group_id, user_id, request.user_id, request.role_id, key)
 
 
 @app.get('/get_groups')  # safe+

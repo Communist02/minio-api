@@ -155,7 +155,7 @@ class MainBase:
             encrypted_private_key = crypt.asym_encrypt_key(
                 group_private_key, user_public_key)
             query = insert(GroupUser).values(
-                user_id=user_id, group_id=group_id, encrypted_private_key=encrypted_private_key)
+                user_id=user_id, group_id=group_id, role_id=1, encrypted_private_key=encrypted_private_key)
             session.execute(query)
             session.commit()
 
@@ -301,7 +301,7 @@ class MainBase:
             session.commit()
             return result
 
-    def add_user_to_group(self, group_id: int, admin_user_id: int, new_user_id: int, key: bytes):
+    def add_user_to_group(self, group_id: int, admin_user_id: int, new_user_id: int, role_id: int, key: bytes):
         group_private_key = self.get_group_private_key(
             group_id, admin_user_id, key)
         user_public_key = self.get_user_public_key(new_user_id)
@@ -310,7 +310,7 @@ class MainBase:
 
         with Session(self.engine) as session:
             query = insert(GroupUser).values(
-                group_id=group_id, user_id=new_user_id, encrypted_private_key=encrypted_group_private_key)
+                group_id=group_id, user_id=new_user_id, role_id=role_id, encrypted_private_key=encrypted_group_private_key)
             session.execute(query)
             session.commit()
 
@@ -418,7 +418,7 @@ class MainBase:
 
     def get_group_users(self, group_id: int, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(GroupUser.user_id, User.login).where(
+            query = select(GroupUser.user_id, User.login, GroupUser.role_id).where(
                 (GroupUser.group_id == group_id) &
                 (GroupUser.group_id).in_(
                     select(GroupUser.group_id).where(
@@ -428,7 +428,8 @@ class MainBase:
             result = session.execute(query).all()
             users = []
             for user in result:
-                users.append({'id': user[0], 'login': user[1]})
+                users.append(
+                    {'id': user[0], 'login': user[1], 'role_id': user[2]})
             return users
 
     def get_access_types(self) -> list:
