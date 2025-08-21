@@ -1,6 +1,6 @@
-from os import access
+from datetime import datetime
 import cryptography
-from sqlalchemy import VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, delete, event
+from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, delete, event, update
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
@@ -84,6 +84,18 @@ class AccessToCollection(Base):
     collection_id = Column(ForeignKey(Collection.id), nullable=False)
     encrypted_key = Column(BINARY(92), nullable=False)
     type_id = Column(ForeignKey(AccessType.id), nullable=False)
+    user_id = Column(ForeignKey(User.id), nullable=True)
+    group_id = Column(ForeignKey(Group.id), nullable=True)
+
+
+class Log(Base):
+    __tablename__ = 'logs'
+
+    id = Column(INT, primary_key=True, autoincrement=True)
+    date_time = Column(DATETIME, nullable=False)
+    action = Column(VARCHAR(255), nullable=False)
+    message = Column(TEXT, nullable=True)
+    result = Column(INT, nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=True)
     group_id = Column(ForeignKey(Group.id), nullable=True)
 
@@ -190,7 +202,6 @@ class MainBase:
                 query = select(AccessToCollection.encrypted_key, AccessToCollection.group_id).where(
                     (AccessToCollection.collection_id == collection_id) & (AccessToCollection.group_id.in_(groups)))
                 result = session.execute(query).all()
-                print(result)
                 encrypted_key = result[0][0]
                 group_id = result[0][1]
                 group_private_key = self.get_group_private_key(
@@ -204,7 +215,6 @@ class MainBase:
             user_private_key = self.get_user_private_key(user_id, key)
             query = select(GroupUser.encrypted_private_key).where(
                 (GroupUser.group_id == group_id) & (GroupUser.user_id == user_id))
-            print(session.execute(query).all())
             encrypted_private_key = session.execute(query).scalar_one()
             group_private_key = crypt.asym_decrypt_key(
                 encrypted_private_key, user_private_key)
@@ -217,12 +227,12 @@ class MainBase:
             return user_id
 
     def get_collections(self, user_id: int) -> list:
-        personal = self.get_personal_collections(user_id)
+        personal = self.get_owner_collections(user_id)
         accessed = self.get_collections_accessed(user_id)
         group = self.get_group_collections(user_id)
         return personal + accessed + group
 
-    def get_personal_collections(self, user_id: int) -> list:
+    def get_owner_collections(self, user_id: int) -> list:
         result = []
         with Session(self.engine) as session:
             query = select(AccessToCollection.collection_id, Collection.name, AccessToCollection.type_id).where(
@@ -314,10 +324,20 @@ class MainBase:
             session.execute(query)
             session.commit()
 
-    def delete_user_to_group(self, group_id: int, user_id: int):
+    def delete_user_to_group(self, group_id: int, delete_user_id: int, user_id: int):
         with Session(self.engine) as session:
-            query = delete(GroupUser).where((GroupUser.user_id ==
-                                            user_id) & (GroupUser.group_id == group_id))
+            query = delete(GroupUser).where(
+                (GroupUser.user_id == delete_user_id) &
+                (GroupUser.group_id == group_id) &
+                ((GroupUser.role_id != 1) | (select(GroupUser.role_id).where(
+                    (GroupUser.user_id == user_id) &
+                    (GroupUser.group_id == group_id)
+                ).scalar_subquery() == 1)) &
+                ((GroupUser.role_id > select(GroupUser.role_id).where(
+                    (GroupUser.user_id == user_id) &
+                    (GroupUser.group_id == group_id)
+                )) | (GroupUser.user_id == user_id))
+            )
             session.execute(query)
             session.commit()
 
@@ -337,12 +357,13 @@ class MainBase:
 
     def get_groups(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(Group.id, Group.title).where(
+            query = select(Group.id, Group.title, GroupUser.role_id).where(
                 (GroupUser.user_id == user_id) & (GroupUser.group_id == Group.id))
             result = session.execute(query).all()
             groups = []
             for group in result:
-                groups.append({'id': group[0], 'title': group[1]})
+                groups.append(
+                    {'id': group[0], 'title': group[1], 'role_id': group[2]})
             return groups
 
     def remove_collection(self, collection_name: str, user_id: int):
@@ -366,7 +387,7 @@ class MainBase:
                 users.append({'id': user[0], 'login': user[1]})
             return users
 
-    def get_access_to_collection(self, collection_id: int, user_id: int):
+    def get_access_to_collection(self, collection_id: int, user_id: int) -> list:
         with Session(self.engine) as session:
             query = select(
                 AccessToCollection.id,
@@ -442,3 +463,47 @@ class MainBase:
                 access_types.append(
                     {'id': access_type[0], 'name': access_type[1]})
             return access_types
+
+    def transfer_power_to_group(self, group_id: int, owner_user_id: int, user_id: int) -> bool:
+        with Session(self.engine) as session:
+            query = update(GroupUser).where(
+                (GroupUser.group_id == group_id) &
+                (GroupUser.user_id == owner_user_id) &
+                (GroupUser.role_id == 1)
+            ).values(role_id=2)
+            result = session.execute(query)
+            if result.rowcount == 1:
+                query = update(GroupUser).where(
+                    (GroupUser.group_id == group_id) &
+                    (GroupUser.user_id == user_id)
+                ).values(role_id=1)
+                session.execute(query)
+                session.commit()
+                return True
+            else:
+                return False
+
+    def add_log(self, action: str, result: int, message: str, user_id: int = None, group_id: int = None):
+        with Session(self.engine) as session:
+            query = insert(Log).values(date_time=datetime.now(), action=action,
+                                       result=result, message=str(message), user_id=user_id, group_id=group_id)
+            session.execute(query)
+            session.commit()
+
+    def get_type_access(self, collection_id: int, user_id: int):
+        with Session(self.engine) as session:
+            if not isinstance(collection_id, int):
+                query = select(Collection.id).where(
+                    Collection.name == collection_id)
+                collection_id = session.execute(query).scalar_one()
+
+            all_access_to_collection = self.get_access_to_collection(
+                collection_id, user_id)
+            collections = self.get_group_collections(user_id)
+            for access in all_access_to_collection:
+                if access['target_type'] == 'user':
+                    if access['target_id'] == user_id:
+                        return access['type_id']
+            result = list(filter(lambda x: x['id'] == collection_id, collections))
+            if len(result) > 0:
+                return result[0]['access_type_id']

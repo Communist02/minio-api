@@ -321,14 +321,26 @@ class Client:
 
         await self.delete_files(bucket_name, [path], access_key, secret_key, sts_token)
 
-    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
+    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, overwrite=True):
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
+
+        object_name = path.strip('/') + '/' + file.filename
+        if not overwrite:
+            try:
+                client.stat_object(bucket_name=bucket_name,
+                                   object_name=object_name, ssec=encryption_key)
+                raise HTTPException(
+                    status_code=403,
+                    detail='You cannot overwrite the file'
+                )
+            except S3Error as error:
+                pass
 
         await asyncio.to_thread(
             client.put_object,
             bucket_name=bucket_name,
-            object_name=path.strip('/') + '/' + file.filename,
+            object_name=object_name,
             data=file.file,
             length=file.size,
             sse=encryption_key,
@@ -351,6 +363,12 @@ class Client:
                        sts_token, secure=True, cert_check=self.cert_check)
         try:
             client.make_bucket(bucket_name)
+        except ValueError as error:
+            print(f"Failed create bucket '{bucket_name}': {error}")
+            raise HTTPException(
+                status_code=406,
+                detail=f"Failed create bucket '{bucket_name}': {error}"
+            )
         except S3Error as error:
             print(f"Failed create bucket '{bucket_name}': {error.message}")
             raise HTTPException(
@@ -446,88 +464,178 @@ ldap = LDAPManager()
 minio = Client(config.url)
 
 
-@app.get('/') # access-
-async def get_list_files(bucket: str, token: str) -> list | None:
+@app.get('/')  # access+
+async def get_list_files(token: str, bucket: str) -> list | None:
+    access = [1, 2, 3, 4]
     session = web_sessions.get_session(token[:32])
     if session:
-        return await minio.get_files(bucket, session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(bucket, session['user_id']) in access:
+            return await minio.get_files(bucket, session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.get('/get_list_collections') # access-
+@app.get('/get_list_collections')
 async def get_list_collections(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_collections(user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.get('/download') # access-
+@app.get('/download')  # access+
 async def download(bucket: str, file: str, token: str, request: Request) -> StreamingResponse:
+    access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(
-            bucket, session['user_id'], key)
-        file = file.strip('/')
-        range_header = request.headers.get('Range')
-        return await minio.download_file(bucket, file, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+        if database.get_type_access(bucket, session['user_id']) in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                bucket, session['user_id'], key)
+            file = file.strip('/')
+            range_header = request.headers.get('Range')
+            return await minio.download_file(bucket, file, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.delete('/') # access-
+@app.delete('/')  # access+
 async def delete(bucket: str, files: str, token: str):
+    access = [1, 2]
     session = web_sessions.get_session(token[:32])
     if session:
-        await minio.delete_files(bucket, files.split('|'), session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(bucket, session['user_id']) in access:
+            await minio.delete_files(bucket, files.split('|'), session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/copy') # access-
+@app.post('/copy')  # access+
 async def copy(request: CopyRequest):
+    access = [1, 2]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(
-            request.bucket, session['user_id'], key)
-        await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(request.bucket, session['user_id']) in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                request.bucket, session['user_id'], key)
+            await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/rename') # access-
+@app.post('/rename')  # access+
 async def rename(request: RenameRequest):
+    access = [1, 2]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(
-            request.bucket, session['user_id'], key)
-        await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(request.bucket, session['user_id']) in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                request.bucket, session['user_id'], key)
+            await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/new_folder') # access-
+@app.post('/new_folder')  # access+
 async def new_folder(request: NewFolderRequest):
+    access = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(
-            request.bucket, session['user_id'], key)
-        await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(request.bucket, session['user_id']) in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                request.bucket, session['user_id'], key)
+            await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.put('/')  # access-
+@app.put('/')  # access+
 async def upload_file(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]) -> str | None:
+    access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        collection_key = database.get_collection_key(
-            bucket, session['user_id'], key)
-        await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
-        return file.filename
+        access = database.get_type_access(bucket, session['user_id'])
+        if access in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                bucket, session['user_id'], key)
+            await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access != 4)
+            return file.filename
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/auth')  # safe +
@@ -575,42 +683,98 @@ async def registration(login: str, password: str):
     database.add_user(login, password)
 
 
-@app.post('/create_collection')  # safe+
+@app.post('/create_collection')  # safe+ log+
 async def create_collection(request: CreateCollectionRequest):
     session = web_sessions.get_session(request.token[:32])
     if session:
-        await minio.create_bucket(request.name, session['access_key'], session['secret_key'], session['sts_token'])
-        return database.create_collection(request.name, session['user_id'])
+        try:
+            await minio.create_bucket(request.name, session['access_key'], session['secret_key'], session['sts_token'])
+        except HTTPException as error:
+            database.add_log('create_collection', error.status_code,
+                             error.detail, user_id=session['user_id'])
+            raise error
+        result = database.create_collection(request.name, session['user_id'])
+        database.add_log('create_collection', 200,
+                         f'collection_id: {result}', user_id=session['user_id'])
+        return result
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/give_access_user_to_collection')  # safe+ access-
+@app.post('/give_access_user_to_collection')  # safe+ access- logs+
 async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
-        database.give_access_user_to_collection(
-            request.collection_id, user_id, request.user_id, request.access_type_id, key)
+        try:
+            database.give_access_user_to_collection(
+                request.collection_id, user_id, request.user_id, request.access_type_id, key)
+            database.add_log('give_access_user_to_collection',
+                             200, None, user_id=user_id)
+        except Exception as error:
+            database.add_log('give_access_user_to_collection',
+                             500, error, user_id=user_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/create_group')  # safe+
+@app.post('/create_group')  # safe+ logs+
 async def create_group(request: CreateGroupRequest):
     token = request.token[:32]
     user_id = web_sessions.get_user_id(token)
     if user_id:
-        database.create_group(user_id, request.title, request.description)
+        try:
+            database.create_group(user_id, request.title, request.description)
+            database.add_log('create_group', 200, None, user_id=user_id)
+        except Exception as error:
+            database.add_log('create_group', 500, error, user_id=user_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
-@app.post('/give_access_group_to_collection')  # safe+ access-
+@app.post('/give_access_group_to_collection')  # safe+ access- logs+
 async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
-        database.give_access_group_to_collection(
-            request.collection_id, user_id, request.group_id, request.access_type_id, key)
+        try:
+            result = database.give_access_group_to_collection(
+                request.collection_id, user_id, request.group_id, request.access_type_id, key)
+            database.add_log('give_access_group_to_collection',
+                             200, f'access_id: {result}', user_id=user_id)
+        except Exception as error:
+            database.add_log('give_access_group_to_collection',
+                             500, error, user_id=user_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.post('/add_user_to_group')  # safe+ access-
@@ -622,6 +786,11 @@ async def add_user_to_group(request: AddUserToGroupRequest):
         key = hash_reconstruct(hash1, hash2)
         database.add_user_to_group(
             request.group_id, user_id, request.user_id, request.role_id, key)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/get_groups')  # safe+
@@ -637,6 +806,11 @@ async def remove_collection(token: str, collection: str):
     if session:
         await minio.remove_bucket(collection, session['access_key'], session['secret_key'], session['sts_token'])
         database.remove_collection(collection, session['user_id'])
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/get_other_users')  # safe+
@@ -644,6 +818,11 @@ async def get_other_users(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_other_users(user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/get_access_to_collection')  # safe+
@@ -651,6 +830,11 @@ async def get_access_to_collection(token: str, collection_id: int) -> list | Non
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_access_to_collection(collection_id, user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.delete('/delete_access_to_collection')  # safe+
@@ -658,6 +842,23 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.delete_access_to_collection(access_id, user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.delete('/delete_user_to_group')  # safe+
+async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list | None:
+    req_user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.delete_user_to_group(group_id, user_id, req_user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/get_group_users')  # safe+
@@ -665,6 +866,11 @@ async def get_group_users(token: str, group_id: int) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_group_users(group_id, user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.get('/get_access_types')  # safe+
@@ -672,3 +878,32 @@ async def get_access_types(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_access_types()
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/transfer_power_to_group')  # safe+
+async def transfer_power_to_group(token: str, group_id: int, user_id: int):
+    owner_user_id = web_sessions.get_user_id(token[:32])
+    if owner_user_id:
+        database.transfer_power_to_group(group_id, owner_user_id, user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.delete('/exit_group')  # safe+
+async def exit_group(token: str, group_id: int):
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.delete_user_to_group(group_id, user_id, user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
