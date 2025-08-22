@@ -1,6 +1,6 @@
 from datetime import datetime
 import cryptography
-from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, delete, event, update
+from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, event, update
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
@@ -87,6 +87,13 @@ class AccessToCollection(Base):
     user_id = Column(ForeignKey(User.id), nullable=True)
     group_id = Column(ForeignKey(Group.id), nullable=True)
 
+    __table_args__ = (
+        Index('ux_collection_user', collection_id, user_id,
+              unique=True, postgresql_where=user_id.isnot(None)),
+        Index('ux_collection_group', collection_id, group_id,
+              unique=True, postgresql_where=group_id.isnot(None)),
+    )
+
 
 class Log(Base):
     __tablename__ = 'logs'
@@ -155,7 +162,7 @@ class MainBase:
             session.commit()
             return collection_id
 
-    def create_group(self, user_id: int, title: str, description: str):
+    def create_group(self, user_id: int, title: str, description: str) -> int:
         with Session(self.engine) as session:
             query = select(User.public_key).where(User.id == user_id)
             group_private_key, group_public_key = crypt.random_key_pair()
@@ -170,6 +177,7 @@ class MainBase:
                 user_id=user_id, group_id=group_id, role_id=1, encrypted_private_key=encrypted_private_key)
             session.execute(query)
             session.commit()
+            return group_id
 
     def get_user_private_key(self, user_id: int, key: bytes) -> bytes:
         with Session(self.engine) as session:
@@ -284,13 +292,21 @@ class MainBase:
             return session.execute(query).scalar_one()
 
     def give_access_user_to_collection(self, collection_id: int, owner_user_id: int, access_user_id: int, access_type_id: int, key: bytes) -> int:
-        collection_key = self.get_collection_key(
-            collection_id, owner_user_id, key)
-        user_public_key = self.get_user_public_key(access_user_id)
-        collection_encrypted_key = crypt.asym_encrypt_key(
-            collection_key, user_public_key)
-
         with Session(self.engine) as session:
+            query = select(AccessToCollection.user_id).where(
+                (AccessToCollection.user_id == owner_user_id) &
+                (AccessToCollection.collection_id == collection_id) &
+                (AccessToCollection.type_id == 1) &
+                (AccessToCollection.type_id < access_type_id)
+            )
+            session.execute(query).scalar_one()
+
+            collection_key = self.get_collection_key(
+                collection_id, owner_user_id, key)
+            user_public_key = self.get_user_public_key(access_user_id)
+            collection_encrypted_key = crypt.asym_encrypt_key(
+                collection_key, user_public_key)
+
             query = insert(AccessToCollection).values(collection_id=collection_id, user_id=access_user_id,
                                                       type_id=access_type_id, encrypted_key=collection_encrypted_key).returning(AccessToCollection.id)
             result = session.execute(query).scalar_one()
@@ -298,13 +314,21 @@ class MainBase:
             return result
 
     def give_access_group_to_collection(self, collection_id: int, user_id: int, group_id: int, access_type_id: int, key: bytes) -> int:
-        collection_key = self.get_collection_key(
-            collection_id, user_id, key)
-        group_public_key = self.get_group_public_key(group_id)
-        collection_encrypted_key = crypt.asym_encrypt_key(
-            collection_key, group_public_key)
-
         with Session(self.engine) as session:
+            query = select(AccessToCollection.user_id).where(
+                (AccessToCollection.user_id == user_id) &
+                (AccessToCollection.collection_id == collection_id) &
+                (AccessToCollection.type_id == 1) &
+                (AccessToCollection.type_id < access_type_id)
+            )
+            session.execute(query).scalar_one()
+
+            collection_key = self.get_collection_key(
+                collection_id, user_id, key)
+            group_public_key = self.get_group_public_key(group_id)
+            collection_encrypted_key = crypt.asym_encrypt_key(
+                collection_key, group_public_key)
+
             query = insert(AccessToCollection).values(collection_id=collection_id, group_id=group_id,
                                                       type_id=access_type_id, encrypted_key=collection_encrypted_key).returning(AccessToCollection.id)
             result = session.execute(query).scalar_one()
@@ -312,15 +336,22 @@ class MainBase:
             return result
 
     def add_user_to_group(self, group_id: int, admin_user_id: int, new_user_id: int, role_id: int, key: bytes):
-        group_private_key = self.get_group_private_key(
-            group_id, admin_user_id, key)
-        user_public_key = self.get_user_public_key(new_user_id)
-        encrypted_group_private_key = crypt.asym_encrypt_key(
-            group_private_key, user_public_key)
-
         with Session(self.engine) as session:
-            query = insert(GroupUser).values(
-                group_id=group_id, user_id=new_user_id, role_id=role_id, encrypted_private_key=encrypted_group_private_key)
+            query = select(GroupUser.user_id).where(
+                (GroupUser.user_id == admin_user_id) &
+                (GroupUser.group_id == group_id) &
+                (GroupUser.role_id < role_id)
+            )
+            session.execute(query).scalar_one()
+
+            group_private_key = self.get_group_private_key(
+                group_id, admin_user_id, key)
+            user_public_key = self.get_user_public_key(new_user_id)
+            encrypted_group_private_key = crypt.asym_encrypt_key(
+                group_private_key, user_public_key)
+
+            query = insert(GroupUser).values(group_id=group_id, user_id=new_user_id,
+                                             role_id=role_id, encrypted_private_key=encrypted_group_private_key)
             session.execute(query)
             session.commit()
 
@@ -504,6 +535,7 @@ class MainBase:
                 if access['target_type'] == 'user':
                     if access['target_id'] == user_id:
                         return access['type_id']
-            result = list(filter(lambda x: x['id'] == collection_id, collections))
+            result = list(
+                filter(lambda x: x['id'] == collection_id, collections))
             if len(result) > 0:
                 return result[0]['access_type_id']

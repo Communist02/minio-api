@@ -638,7 +638,7 @@ async def upload_file(file: UploadFile, bucket: Annotated[str, Form()], path: An
         )
 
 
-@app.get('/auth')  # safe +
+@app.get('/auth')  # safe+ logs+
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
     user_id = ldap.auth(credentials.username, credentials.password)
     if user_id is not None:
@@ -646,9 +646,11 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         if user_id_db is None:
             database.add_user(user_id, credentials.username,
                               credentials.password)
+            database.add_log('new_user', 200, f'login: {credentials.username}', user_id=user_id)
         elif user_id != user_id_db:
             pass  # Надо сделать обработку такого события
     else:
+        database.add_log('auth', 401, f'login: {credentials.username}', user_id=None)
         raise HTTPException(
             status_code=401,
             detail='Incorrect username or password',
@@ -662,6 +664,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         token, hash1, user_id, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
+    database.add_log('auth', 200, f'login: {credentials.username}', user_id=user_id)
     return {
         'authenticated': True,
         'token': token + hash2,
@@ -683,7 +686,7 @@ async def registration(login: str, password: str):
     database.add_user(login, password)
 
 
-@app.post('/create_collection')  # safe+ log+
+@app.post('/create_collection')  # safe+ logs+
 async def create_collection(request: CreateCollectionRequest):
     session = web_sessions.get_session(request.token[:32])
     if session:
@@ -693,10 +696,11 @@ async def create_collection(request: CreateCollectionRequest):
             database.add_log('create_collection', error.status_code,
                              error.detail, user_id=session['user_id'])
             raise error
-        result = database.create_collection(request.name, session['user_id'])
+        collection_id = database.create_collection(
+            request.name, session['user_id'])
         database.add_log('create_collection', 200,
-                         f'collection_id: {result}', user_id=session['user_id'])
-        return result
+                         f'collection_id: {collection_id}', user_id=session['user_id'])
+        return collection_id
     else:
         raise HTTPException(
             status_code=401,
@@ -715,10 +719,10 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
             database.give_access_user_to_collection(
                 request.collection_id, user_id, request.user_id, request.access_type_id, key)
             database.add_log('give_access_user_to_collection',
-                             200, None, user_id=user_id)
+                             200, f'collection_id: {request.collection_id}, access_type_id: {request.access_type_id}', user_id=user_id)
         except Exception as error:
             database.add_log('give_access_user_to_collection',
-                             500, error, user_id=user_id)
+                             500, str(error) + f'\ncollection_id: {request.collection_id}, access_type_id: {request.access_type_id}', user_id=user_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
@@ -736,10 +740,13 @@ async def create_group(request: CreateGroupRequest):
     user_id = web_sessions.get_user_id(token)
     if user_id:
         try:
-            database.create_group(user_id, request.title, request.description)
-            database.add_log('create_group', 200, None, user_id=user_id)
+            group_id = database.create_group(
+                user_id, request.title, request.description)
+            database.add_log(
+                'create_group', 200, f'title: {request.title}, description: {request.description}', user_id=user_id, group_id=group_id)
         except Exception as error:
-            database.add_log('create_group', 500, error, user_id=user_id)
+            database.add_log('create_group', 500, str(
+                error) + f'\ntitle: {request.title}, description: {request.description}', user_id=user_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
@@ -759,13 +766,13 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
         try:
-            result = database.give_access_group_to_collection(
+            access_id = database.give_access_group_to_collection(
                 request.collection_id, user_id, request.group_id, request.access_type_id, key)
             database.add_log('give_access_group_to_collection',
-                             200, f'access_id: {result}', user_id=user_id)
+                             200, f'access_id: {access_id}, collection_id: {request.collection_id}', user_id=user_id, group_id=request.group_id)
         except Exception as error:
             database.add_log('give_access_group_to_collection',
-                             500, error, user_id=user_id)
+                             500, str(error) + f'\ncollection_id: {request.collection_id}', user_id=user_id, group_id=request.group_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
@@ -777,15 +784,25 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
         )
 
 
-@app.post('/add_user_to_group')  # safe+ access-
+@app.post('/add_user_to_group')  # safe+ logs+
 async def add_user_to_group(request: AddUserToGroupRequest):
     token, hash2 = request.token[:32], request.token[32:]
     hash1, user_id = web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
-        database.add_user_to_group(
-            request.group_id, user_id, request.user_id, request.role_id, key)
+        try:
+            database.add_user_to_group(
+                request.group_id, user_id, request.user_id, request.role_id, key)
+            database.add_log('add_user_to_group', 200,
+                             f'role_id: {request.role_id}, user_id: {request.user_id}', user_id=user_id, group_id=request.group_id)
+        except Exception as error:
+            database.add_log('add_user_to_group', 500, str(error) +
+                             f'\nrole_id: {request.role_id}, user_id: {request.user_id}', user_id=user_id, group_id=request.group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
         raise HTTPException(
             status_code=401,
@@ -800,12 +817,19 @@ async def get_groups(token: str) -> list | None:
         return database.get_groups(user_id)
 
 
-@app.delete('/remove_collection')  # safe+
+@app.delete('/remove_collection')  # safe+ logs+
 async def remove_collection(token: str, collection: str):
     session = web_sessions.get_session(token[:32])
     if session:
-        await minio.remove_bucket(collection, session['access_key'], session['secret_key'], session['sts_token'])
+        try:
+            await minio.remove_bucket(collection, session['access_key'], session['secret_key'], session['sts_token'])
+        except HTTPException as error:
+            database.add_log('remove_collection', error.status_code,
+                             error.detail, user_id=session['user_id'])
+            raise error
         database.remove_collection(collection, session['user_id'])
+        database.add_log('create_collection', 200,
+                         f'collection_name: {collection}', user_id=session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -837,11 +861,21 @@ async def get_access_to_collection(token: str, collection_id: int) -> list | Non
         )
 
 
-@app.delete('/delete_access_to_collection')  # safe+
+@app.delete('/delete_access_to_collection')  # safe+ logs+
 async def delete_access_to_collection(token: str, access_id: int) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        return database.delete_access_to_collection(access_id, user_id)
+        try:
+            database.delete_access_to_collection(access_id, user_id)
+            database.add_log('delete_access_to_collection', 200,
+                             f'access_id: {access_id}', user_id=user_id)
+        except Exception as error:
+            database.add_log('delete_access_to_collection', 500, str(error) +
+                             f'\naccess_id: {access_id}', user_id=user_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
         raise HTTPException(
             status_code=401,
@@ -849,11 +883,21 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
         )
 
 
-@app.delete('/delete_user_to_group')  # safe+
+@app.delete('/delete_user_to_group')  # safe+ logs+
 async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list | None:
     req_user_id = web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.delete_user_to_group(group_id, user_id, req_user_id)
+    if req_user_id:
+        try:
+            database.delete_user_to_group(group_id, user_id, req_user_id)
+            database.add_log('delete_user_to_group', 200,
+                             f'user_id: {user_id}', user_id=req_user_id, group_id=group_id)
+        except Exception as error:
+            database.add_log('delete_user_to_group', 500, str(error) +
+                             f'\nuser_id: {user_id}', user_id=req_user_id, group_id=group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
         raise HTTPException(
             status_code=401,
@@ -889,7 +933,17 @@ async def get_access_types(token: str) -> list | None:
 async def transfer_power_to_group(token: str, group_id: int, user_id: int):
     owner_user_id = web_sessions.get_user_id(token[:32])
     if owner_user_id:
-        database.transfer_power_to_group(group_id, owner_user_id, user_id)
+        try:
+            database.transfer_power_to_group(group_id, owner_user_id, user_id)
+            database.add_log('transfer_power_to_group', 200,
+                             f'user_id: {user_id}', user_id=owner_user_id, group_id=group_id)
+        except Exception as error:
+            database.add_log('transfer_power_to_group', 500, str(error) +
+                             f'\nuser_id: {user_id}', user_id=owner_user_id, group_id=group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
         raise HTTPException(
             status_code=401,
@@ -897,11 +951,19 @@ async def transfer_power_to_group(token: str, group_id: int, user_id: int):
         )
 
 
-@app.delete('/exit_group')  # safe+
+@app.delete('/exit_group')  # safe+ logs+
 async def exit_group(token: str, group_id: int):
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        return database.delete_user_to_group(group_id, user_id, user_id)
+        try:
+            database.delete_user_to_group(group_id, user_id, user_id)
+            database.add_log('exit_group', 200, '', user_id=user_id, group_id=group_id)
+        except Exception as error:
+            database.add_log('exit_group', 500, str(error), user_id=user_id, group_id=group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
         raise HTTPException(
             status_code=401,
