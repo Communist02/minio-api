@@ -1,6 +1,6 @@
 from datetime import datetime
 import cryptography
-from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, event, update
+from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, event, update, func
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
@@ -372,29 +372,15 @@ class MainBase:
             session.execute(query)
             session.commit()
 
-    def delete_access_user_to_collection(self, collection_id: int, user_id: int):
-        with Session(self.engine) as session:
-            query = delete(AccessToCollection).where(
-                (AccessToCollection.user_id == user_id) & (AccessToCollection.collection_id == collection_id))
-            session.execute(query)
-            session.commit()
-
-    def delete_access_group_to_collection(self, group_id: int, user_id: int):
-        with Session(self.engine) as session:
-            query = delete(AccessToCollection).where(
-                (AccessToCollection.user_id == user_id) & (AccessToCollection.group_id == group_id))
-            session.execute(query)
-            session.commit()
-
     def get_groups(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(Group.id, Group.title, GroupUser.role_id).where(
+            query = select(Group.id, Group.title, Group.description, GroupUser.role_id).where(
                 (GroupUser.user_id == user_id) & (GroupUser.group_id == Group.id))
             result = session.execute(query).all()
             groups = []
             for group in result:
                 groups.append(
-                    {'id': group[0], 'title': group[1], 'role_id': group[2]})
+                    {'id': group[0], 'title': group[1], 'description': group[2], 'role_id': group[3]})
             return groups
 
     def remove_collection(self, collection_name: str, user_id: int):
@@ -455,6 +441,7 @@ class MainBase:
         with Session(self.engine) as session:
             query = delete(AccessToCollection).where(
                 (AccessToCollection.id == access_id) &
+                (AccessToCollection.type_id != 1) &
                 (
                     (AccessToCollection.user_id == user_id) |
                     (AccessToCollection.collection_id.in_(
@@ -510,9 +497,6 @@ class MainBase:
                 ).values(role_id=1)
                 session.execute(query)
                 session.commit()
-                return True
-            else:
-                return False
 
     def add_log(self, action: str, result: int, message: str, user_id: int = None, group_id: int = None):
         with Session(self.engine) as session:
@@ -539,3 +523,51 @@ class MainBase:
                 filter(lambda x: x['id'] == collection_id, collections))
             if len(result) > 0:
                 return result[0]['access_type_id']
+
+    def change_role_in_group(self, group_id: int, owner_user_id: int, user_id: int, role_id: int) -> bool:
+        with Session(self.engine) as session:
+            if role_id != 1:
+                query = select(GroupUser.user_id).where(
+                    (GroupUser.group_id == group_id) &
+                    (GroupUser.user_id == owner_user_id) &
+                    (GroupUser.role_id == 1)
+                )
+                session.execute(query).scalar_one()
+
+                query = update(GroupUser).where(
+                    (GroupUser.group_id == group_id) &
+                    (GroupUser.user_id == user_id) &
+                    (GroupUser.role_id != 1)
+                ).values(role_id=role_id)
+                session.execute(query)
+                session.commit()
+                return True
+            else:
+                return False
+
+    def get_user_info(self, user_id: int):
+        with Session(self.engine) as session:
+            query = select(User.id, User.login).where(User.id == user_id)
+            user = session.execute(query).one()
+            query = select(func.count('*')).select_from(AccessToCollection).where(
+                (AccessToCollection.user_id == user_id) & (AccessToCollection.type_id == 1))
+            count_collections = session.execute(query).scalar_one()
+            result = {'id': user.id, 'login': user.login,
+                      'count_collections': count_collections}
+            return result
+
+    def change_access_type(self, access_id: int, user_id: int, access_type_id: int) -> bool:
+        with Session(self.engine) as session:
+            if access_id != 1:
+                query = update(AccessToCollection).where(
+                    (AccessToCollection.id == access_id) &
+                    (AccessToCollection.user_id != user_id) &
+                    (AccessToCollection.collection_id.in_(
+                        select(AccessToCollection.collection_id).where(
+                            (AccessToCollection.user_id == user_id) &
+                            (AccessToCollection.type_id == 1)
+                        )
+                    ))
+                ).values(type_id=access_type_id)
+                session.execute(query)
+                session.commit()

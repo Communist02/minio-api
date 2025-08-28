@@ -618,13 +618,13 @@ async def upload_file(file: UploadFile, bucket: Annotated[str, Form()], path: An
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        access = database.get_type_access(bucket, session['user_id'])
-        if access in access:
+        access_type = database.get_type_access(bucket, session['user_id'])
+        if access_type in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 bucket, session['user_id'], key)
-            await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access != 4)
+            await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access_type != 4)
             return file.filename
         else:
             raise HTTPException(
@@ -646,11 +646,13 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         if user_id_db is None:
             database.add_user(user_id, credentials.username,
                               credentials.password)
-            database.add_log('new_user', 200, f'login: {credentials.username}', user_id=user_id)
+            database.add_log(
+                'new_user', 200, f'login: {credentials.username}', user_id=user_id)
         elif user_id != user_id_db:
             pass  # Надо сделать обработку такого события
     else:
-        database.add_log('auth', 401, f'login: {credentials.username}', user_id=None)
+        database.add_log(
+            'auth', 401, f'login: {credentials.username}', user_id=None)
         raise HTTPException(
             status_code=401,
             detail='Incorrect username or password',
@@ -664,7 +666,8 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         token, hash1, user_id, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
-    database.add_log('auth', 200, f'login: {credentials.username}', user_id=user_id)
+    database.add_log(
+        'auth', 200, f'login: {credentials.username}', user_id=user_id)
     return {
         'authenticated': True,
         'token': token + hash2,
@@ -957,9 +960,68 @@ async def exit_group(token: str, group_id: int):
     if user_id:
         try:
             database.delete_user_to_group(group_id, user_id, user_id)
-            database.add_log('exit_group', 200, '', user_id=user_id, group_id=group_id)
+            database.add_log('exit_group', 200, '',
+                             user_id=user_id, group_id=group_id)
         except Exception as error:
-            database.add_log('exit_group', 500, str(error), user_id=user_id, group_id=group_id)
+            database.add_log('exit_group', 500, str(error),
+                             user_id=user_id, group_id=group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/change_role_in_group')  # safe+ logs+
+async def change_role_in_group(token: str, group_id: int, user_id: int, role_id: int):
+    owner_user_id = web_sessions.get_user_id(token[:32])
+    if owner_user_id:
+        try:
+            database.change_role_in_group(
+                group_id, owner_user_id, user_id, role_id)
+            database.add_log('change_role_in_group', 200, f'user_id: {user_id}, role_id: {role_id}',
+                             user_id=owner_user_id, group_id=group_id)
+        except Exception as error:
+            database.add_log('change_role_in_group', 500, str(error) + f'\nuser_id: {user_id}, role_id: {role_id}',
+                             user_id=owner_user_id, group_id=group_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.get('/get_user_info')  # safe+
+async def get_user_info(token: str) -> dict[str, int | str]:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.get_user_info(user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/change_access_type')  # safe+ logs+
+async def change_access_type(token: str, access_id: int, access_type_id: int):
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        try:
+            database.change_access_type(access_id, user_id, access_type_id)
+            database.add_log('change_access_type', 200, f'access_id: {access_id}, access_type_id: {access_type_id}',
+                             user_id=user_id)
+        except Exception as error:
+            database.add_log('change_access_type', 500, str(
+                error) + f'\naccess_id: {access_id}, access_type_id: {access_type_id}', user_id=user_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
