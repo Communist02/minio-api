@@ -505,7 +505,7 @@ class MainBase:
             session.execute(query)
             session.commit()
 
-    def get_type_access(self, collection_id: int, user_id: int):
+    def get_type_access(self, collection_id: int | str, user_id: int):
         with Session(self.engine) as session:
             if not isinstance(collection_id, int):
                 query = select(Collection.id).where(
@@ -556,9 +556,14 @@ class MainBase:
                       'count_collections': count_collections}
             return result
 
+    def get_collection_name(self, collection_id: int) -> str:
+        with Session(self.engine) as session:
+            query = select(Collection.name).where(Collection.id == collection_id)
+            return session.execute(query).scalar_one()
+
     def change_access_type(self, access_id: int, user_id: int, access_type_id: int) -> bool:
         with Session(self.engine) as session:
-            if access_id != 1:
+            if access_type_id != 1:
                 query = update(AccessToCollection).where(
                     (AccessToCollection.id == access_id) &
                     (AccessToCollection.user_id != user_id) &
@@ -571,3 +576,17 @@ class MainBase:
                 ).values(type_id=access_type_id)
                 session.execute(query)
                 session.commit()
+
+    def change_group_info(self, user_id: int, group_id: int, title: str, description: str) -> bool:
+        with Session(self.engine) as session:
+            query = update(Group).where(
+                (Group.id == group_id) &
+                (Group.id.in_(
+                    select(GroupUser.group_id).where(
+                        (GroupUser.user_id == user_id) &
+                        (GroupUser.role_id <= 2)
+                    )
+                ))
+            ).values(title=title, description=description)
+            session.execute(query)
+            session.commit()

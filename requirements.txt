@@ -6,3 +6,4 @@ SQLAlchemy
 pymysql
 ldap3
 requests
+zipstream

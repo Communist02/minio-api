@@ -20,6 +20,7 @@ from minio.deleteobjects import DeleteObject
 import config
 from ldap import LDAPManager
 from get_token import get_sts_token
+import zipstream
 
 
 class Client:
@@ -151,11 +152,11 @@ class Client:
     #             detail=f'Failed to generate download URL: {error.message}'
     #         )
 
-    async def download_file(self, bucket_name: str, file_path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, range_header: str = None) -> StreamingResponse:
+    async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, range_header: str = None) -> StreamingResponse:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
-        async def file_iterator(stream, chunk_size=1024 * 1024 * 4):
+        async def file_iterator(stream, chunk_size=1024 * 1024):
             while True:
                 data = await asyncio.to_thread(stream.read, chunk_size)
                 if not data:
@@ -202,7 +203,7 @@ class Client:
 
                 return StreamingResponse(
                     file_iterator(obj),
-                    media_type='application/octet-stream',
+                    media_type='application/octet-stream' if preview else None,
                     headers=headers,
                     status_code=206  # Partial Content
                 )
@@ -214,7 +215,7 @@ class Client:
                 )
                 return StreamingResponse(
                     file_iterator(obj),
-                    media_type='application/octet-stream',
+                    media_type='application/octet-stream' if preview else None,
                     headers=headers
                 )
         except S3Error as error:
@@ -224,7 +225,57 @@ class Client:
                 detail=f'Failed to get the file: {error.message}'
             )
 
-    async def copy_files(self, bucket_name: str, source_paths: list[str], destination_path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
+    async def download_files(self, bucket_name: str, file_paths: list, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str) -> StreamingResponse:
+        client = Minio(self.endpoint, access_key, secret_key,
+                       sts_token, secure=True, cert_check=self.cert_check)
+
+        files_to_download = []
+
+        try:
+            for path in file_paths:
+                object_name = path.strip('/')
+
+                if not path.endswith('/'):
+                    files_to_download.append(object_name)
+                else:
+                    objects = client.list_objects(
+                        bucket_name, prefix=object_name, recursive=True)
+                    
+                    for obj in objects:
+                        if not obj.object_name.endswith('/NODATA'):
+                            files_to_download.append(obj.object_name)
+
+            # Создаём потоковый zip-архив
+            z = zipstream.ZipFile(mode="w", compression=zipstream.ZIP_DEFLATED)
+
+            for obj_name in files_to_download:
+                # Оборачиваем поток MinIO в генератор
+                def file_generator(obj_name=obj_name):
+                    response = client.get_object(bucket_name, obj_name, ssec=encryption_key)
+                    try:
+                        for chunk in response.stream(1024 * 1024):
+                            yield chunk
+                    finally:
+                        response.close()
+                        response.release_conn()
+
+                # Добавляем в архив "ленивый" источник данных
+                z.write_iter(obj_name, file_generator())
+
+            # Отдаём как стрим
+            return StreamingResponse(
+                z,
+                media_type="application/zip",
+                headers={"Content-Disposition": 'attachment; filename="files.zip"'}
+            )
+        except S3Error as error:
+            print(f'Failed to get the file: {error.message}')
+            raise HTTPException(
+                status_code=404 if error.code == 'NoSuchKey' else 403,
+                detail=f'Failed to get the file: {error.message}'
+            )
+
+    async def copy_files(self, source_bucket_name: str, source_paths: list[str], destination_bucket_name: str, destination_path: str, source_encryption_key: SseCustomerKey, destination_encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
@@ -233,18 +284,18 @@ class Client:
                 try:
                     prefix = source.strip('/')
                     objects = client.list_objects(
-                        bucket_name, prefix=prefix, recursive=True)
+                        source_bucket_name, prefix=prefix, recursive=True)
                     for obj in objects:
                         object_name = obj.object_name
                         relative_path = prefix.split(
                             '/')[-1] + '/' + object_name[len(prefix):].lstrip('/')
                         destination_object_name = f'{destination_path.rstrip('/')}/{relative_path}'
                         client.copy_object(
-                            bucket_name=bucket_name,
+                            bucket_name=destination_bucket_name,
                             object_name=destination_object_name,
                             source=CopySource(
-                                bucket_name, object_name, ssec=encryption_key),
-                            sse=encryption_key,
+                                source_bucket_name, object_name, ssec=source_encryption_key),
+                            sse=destination_encryption_key,
                         )
                 except S3Error as error:
                     print(f"Failed copy folder '{prefix}': {error.message}")
@@ -258,11 +309,11 @@ class Client:
                     destination_object_name = f'{destination_path.rstrip('/')}/{filename}'
                     object_name = source.lstrip('/')
                     client.copy_object(
-                        bucket_name=bucket_name,
+                        bucket_name=destination_bucket_name,
                         object_name=destination_object_name,
                         source=CopySource(
-                            bucket_name, object_name, ssec=encryption_key),
-                        sse=encryption_key,
+                            source_bucket_name, object_name, ssec=source_encryption_key),
+                        sse=destination_encryption_key,
                     )
                 except S3Error as error:
                     print(f"Failed copy file '{object_name}': {error.message}")
@@ -396,9 +447,10 @@ class Client:
 
 
 class CopyRequest(BaseModel):
-    bucket: str
-    sourcePaths: list[str]
-    destinationPath: str
+    source_collection_id: int
+    source_paths: list[str]
+    destination_collection_id: int
+    destination_path: str
     token: str
 
 
@@ -446,6 +498,13 @@ class AddUserToGroupRequest(BaseModel):
     group_id: int
     user_id: int
     role_id: int
+
+
+class EditGroupInfoRequest(BaseModel):
+    token: str
+    group_id: int
+    title: str
+    description: str
 
 
 app = FastAPI()
@@ -496,7 +555,7 @@ async def get_list_collections(token: str) -> list | None:
 
 
 @app.get('/download')  # access+
-async def download(bucket: str, file: str, token: str, request: Request) -> StreamingResponse:
+async def download(bucket: str, file: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
@@ -508,7 +567,31 @@ async def download(bucket: str, file: str, token: str, request: Request) -> Stre
                 bucket, session['user_id'], key)
             file = file.strip('/')
             range_header = request.headers.get('Range')
-            return await minio.download_file(bucket, file, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+            return await minio.download_file(bucket, file, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.get('/download_files')  # access+
+async def download_files(collection_name: str, files: str, token: str) -> StreamingResponse:
+    access = [1, 2, 3]
+    token, hash2 = token[:32], token[32:]
+    session = web_sessions.get_session(token)
+    if session:
+        if database.get_type_access(collection_name, session['user_id']) in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                collection_name, session['user_id'], key)
+            return await minio.download_files(collection_name, files.split('|'), SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -543,15 +626,18 @@ async def delete(bucket: str, files: str, token: str):
 @app.post('/copy')  # access+
 async def copy(request: CopyRequest):
     access = [1, 2]
+    access_dest = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        if database.get_type_access(request.bucket, session['user_id']) in access:
+        if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                request.bucket, session['user_id'], key)
-            await minio.copy_files(request.bucket, request.sourcePaths, request.destinationPath, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+            source_collection_key = database.get_collection_key(
+                request.source_collection_id, session['user_id'], key)
+            destination_collection_key = database.get_collection_key(
+                request.destination_collection_id, session['user_id'], key)
+            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, database.get_collection_name(request.destination_collection_id), request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -612,19 +698,19 @@ async def new_folder(request: NewFolderRequest):
         )
 
 
-@app.put('/')  # access+
-async def upload_file(file: UploadFile, bucket: Annotated[str, Form()], path: Annotated[str, Form()], token: Annotated[str, Form()]) -> str | None:
+@app.post('/upload')  # access+
+async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
     access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        access_type = database.get_type_access(bucket, session['user_id'])
+        access_type = database.get_type_access(collection_id, session['user_id'])
         if access_type in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
-                bucket, session['user_id'], key)
-            await minio.upload_file(bucket, file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access_type != 4)
+                collection_id, session['user_id'], key)
+            await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access_type != 4)
             return file.filename
         else:
             raise HTTPException(
@@ -1022,6 +1108,29 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
         except Exception as error:
             database.add_log('change_access_type', 500, str(
                 error) + f'\naccess_id: {access_id}, access_type_id: {access_type_id}', user_id=user_id)
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/change_group_info')  # safe+ logs+
+async def change_group_info(request: EditGroupInfoRequest):
+    user_id = web_sessions.get_user_id(request.token[:32])
+    if user_id:
+        try:
+            database.change_group_info(
+                user_id, request.group_id, request.title, request.description)
+            database.add_log('change_group_info', 200, f'title: {request.title}, description: {request.description}',
+                             user_id=user_id, group_id=request.group_id)
+        except Exception as error:
+            database.add_log('change_group_info', 500, str(
+                error) + f'\ntitle: {request.title}, description: {request.description}', user_id=user_id, group_id=request.group_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
