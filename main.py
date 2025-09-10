@@ -240,7 +240,7 @@ class Client:
                 else:
                     objects = client.list_objects(
                         bucket_name, prefix=object_name, recursive=True)
-                    
+
                     for obj in objects:
                         if not obj.object_name.endswith('/NODATA'):
                             files_to_download.append(obj.object_name)
@@ -251,7 +251,8 @@ class Client:
             for obj_name in files_to_download:
                 # Оборачиваем поток MinIO в генератор
                 def file_generator(obj_name=obj_name):
-                    response = client.get_object(bucket_name, obj_name, ssec=encryption_key)
+                    response = client.get_object(
+                        bucket_name, obj_name, ssec=encryption_key)
                     try:
                         for chunk in response.stream(1024 * 1024):
                             yield chunk
@@ -704,7 +705,8 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        access_type = database.get_type_access(collection_id, session['user_id'])
+        access_type = database.get_type_access(
+            collection_id, session['user_id'])
         if access_type in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
@@ -917,7 +919,7 @@ async def remove_collection(token: str, collection: str):
                              error.detail, user_id=session['user_id'])
             raise error
         database.remove_collection(collection, session['user_id'])
-        database.add_log('create_collection', 200,
+        database.add_log('remove_collection', 200,
                          f'collection_name: {collection}', user_id=session['user_id'])
     else:
         raise HTTPException(
@@ -1135,6 +1137,18 @@ async def change_group_info(request: EditGroupInfoRequest):
                 status_code=500,
                 detail=''
             )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.get('/get_logs')  # safe+
+async def get_logs(token: str) -> list:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        return database.get_logs(user_id)
     else:
         raise HTTPException(
             status_code=401,

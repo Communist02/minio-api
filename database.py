@@ -558,7 +558,8 @@ class MainBase:
 
     def get_collection_name(self, collection_id: int) -> str:
         with Session(self.engine) as session:
-            query = select(Collection.name).where(Collection.id == collection_id)
+            query = select(Collection.name).where(
+                Collection.id == collection_id)
             return session.execute(query).scalar_one()
 
     def change_access_type(self, access_id: int, user_id: int, access_type_id: int) -> bool:
@@ -590,3 +591,14 @@ class MainBase:
             ).values(title=title, description=description)
             session.execute(query)
             session.commit()
+
+    def get_logs(self, user_id: int):
+        with Session(self.engine) as session:
+            query = select(Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id).where(Log.user_id == user_id).limit(500)
+            result = session.execute(query).all()
+            logs = []
+            for log in result:
+                logs.append(
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': log[4], 'group_id': log[5]})
+            logs.reverse()
+            return logs
