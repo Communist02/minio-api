@@ -456,14 +456,12 @@ class CopyRequest(BaseModel):
 
 
 class RenameRequest(BaseModel):
-    bucket: str
     path: str
-    newName: str
+    new_name: str
     token: str
 
 
 class NewFolderRequest(BaseModel):
-    bucket: str
     name: str
     path: str
     token: str
@@ -524,26 +522,7 @@ ldap = LDAPManager()
 minio = Client(config.url)
 
 
-@app.get('/')  # access+
-async def get_list_files(token: str, bucket: str) -> list | None:
-    access = [1, 2, 3, 4]
-    session = web_sessions.get_session(token[:32])
-    if session:
-        if database.get_type_access(bucket, session['user_id']) in access:
-            return await minio.get_files(bucket, session['access_key'], session['secret_key'], session['sts_token'])
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.get('/get_list_collections')
+@app.get('/collections')
 async def get_list_collections(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
@@ -555,20 +534,39 @@ async def get_list_collections(token: str) -> list | None:
         )
 
 
-@app.get('/download')  # access+
-async def download(bucket: str, file: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
+@app.get('/collections/{collection_id}')  # access+
+async def get_list_files(token: str, collection_id: int) -> list | None:
+    access = [1, 2, 3, 4]
+    session = web_sessions.get_session(token[:32])
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) in access:
+            return await minio.get_files(database.get_collection_name(collection_id), session['access_key'], session['secret_key'], session['sts_token'])
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.get('/collections/{collection_id}/{file:path}')  # access+
+async def download_file(collection_id: int, file: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
     if session:
-        if database.get_type_access(bucket, session['user_id']) in access:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
-                bucket, session['user_id'], key)
+                collection_id, session['user_id'], key)
             file = file.strip('/')
             range_header = request.headers.get('Range')
-            return await minio.download_file(bucket, file, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+            return await minio.download_file(database.get_collection_name(collection_id), file, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
         else:
             raise HTTPException(
                 status_code=403,
@@ -581,18 +579,19 @@ async def download(bucket: str, file: str, token: str, request: Request, preview
         )
 
 
-@app.get('/download_files')  # access+
-async def download_files(collection_name: str, files: str, token: str) -> StreamingResponse:
+@app.get('/archive/collections/{collection_id}')  # access+
+async def download_files(collection_id: int, files: str, token: str) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
+    print(files)
     if session:
-        if database.get_type_access(collection_name, session['user_id']) in access:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
-                collection_name, session['user_id'], key)
-            return await minio.download_files(collection_name, files.split('|'), SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+                collection_id, session['user_id'], key)
+            return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -605,13 +604,13 @@ async def download_files(collection_name: str, files: str, token: str) -> Stream
         )
 
 
-@app.delete('/')  # access+
-async def delete(bucket: str, files: str, token: str):
+@app.delete('/collections/{collection_id}')  # access+
+async def delete(collection_id: int, files: str, token: str):
     access = [1, 2]
     session = web_sessions.get_session(token[:32])
     if session:
-        if database.get_type_access(bucket, session['user_id']) in access:
-            await minio.delete_files(bucket, files.split('|'), session['access_key'], session['secret_key'], session['sts_token'])
+        if database.get_type_access(collection_id, session['user_id']) in access:
+            await minio.delete_files(database.get_collection_name(collection_id), files.split('|'), session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -651,18 +650,18 @@ async def copy(request: CopyRequest):
         )
 
 
-@app.post('/rename')  # access+
-async def rename(request: RenameRequest):
+@app.post('/collections/{collection_id}/rename')  # access+
+async def rename(collection_id: int, request: RenameRequest):
     access = [1, 2]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        if database.get_type_access(request.bucket, session['user_id']) in access:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
-                request.bucket, session['user_id'], key)
-            await minio.rename_file(request.bucket, request.path, request.newName, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+                collection_id, session['user_id'], key)
+            await minio.rename_file(database.get_collection_name(collection_id), request.path, request.new_name, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -675,19 +674,23 @@ async def rename(request: RenameRequest):
         )
 
 
-@app.post('/new_folder')  # access+
-async def new_folder(request: NewFolderRequest):
+@app.post('/collections/{collection_id}/create_folder')  # access+
+async def create_folder(collection_id: int, request: NewFolderRequest):
     access = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
     if session:
-        if database.get_type_access(request.bucket, session['user_id']) in access:
+        access_type = database.get_type_access(
+            collection_id, session['user_id'])
+        if access_type in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
-                request.bucket, session['user_id'], key)
-            await minio.new_folder(request.bucket, request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+                collection_id, session['user_id'], key)
+            await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
         else:
+            database.add_log(
+                'create_folder', 403, f'error: {access_type} not in {access}, collection_id: {collection_id}', user_id=session['user_id'])
             raise HTTPException(
                 status_code=403,
                 detail='No access'
@@ -699,7 +702,7 @@ async def new_folder(request: NewFolderRequest):
         )
 
 
-@app.post('/upload')  # access+
+@app.post('/collections/{collection_id}/upload')  # access+
 async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
     access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
@@ -713,8 +716,12 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
             await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access_type != 4)
+            database.add_log(
+                'upload_file', 200, f'file_name: {file.filename}, path: {path}, collection_id: {collection_id}', user_id=session['user_id'])
             return file.filename
         else:
+            database.add_log(
+                'upload_file', 403, f'access_type: {access_type} not in {access}, collection_id: {collection_id}', user_id=session['user_id'])
             raise HTTPException(
                 status_code=403,
                 detail='No access'
@@ -757,7 +764,6 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     database.add_log(
         'auth', 200, f'login: {credentials.username}', user_id=user_id)
     return {
-        'authenticated': True,
         'token': token + hash2,
         'user_id': user_id,
         'login': credentials.username,
@@ -783,14 +789,14 @@ async def create_collection(request: CreateCollectionRequest):
     if session:
         try:
             await minio.create_bucket(request.name, session['access_key'], session['secret_key'], session['sts_token'])
+            collection_id = database.create_collection(
+                request.name, session['user_id'])
+            database.add_log('create_collection', 200,
+                             f'collection_id: {collection_id}', user_id=session['user_id'])
         except HTTPException as error:
             database.add_log('create_collection', error.status_code,
                              error.detail, user_id=session['user_id'])
             raise error
-        collection_id = database.create_collection(
-            request.name, session['user_id'])
-        database.add_log('create_collection', 200,
-                         f'collection_id: {collection_id}', user_id=session['user_id'])
         return collection_id
     else:
         raise HTTPException(

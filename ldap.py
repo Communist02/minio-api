@@ -1,5 +1,5 @@
 import os
-from ldap3 import ALL, Server, Connection, MODIFY_REPLACE, core, AUTO_BIND_NO_TLS
+from ldap3 import ALL, Server, Connection, MODIFY_REPLACE, core
 print(os.getenv('LDAP_PASS'))
 
 
