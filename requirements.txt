@@ -7,3 +7,4 @@ pymysql
 ldap3
 requests
 zipstream
+opensearch-py

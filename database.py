@@ -5,6 +5,7 @@ from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
 import crypt
+import json
 
 
 class Base(DeclarativeBase):
@@ -16,11 +17,6 @@ class User(Base):
 
     id = Column(INT, primary_key=True)
     login = Column(VARCHAR(25), nullable=False)
-    # fio = Column(VARCHAR(140))
-    # email = Column(VARCHAR(50))
-    # job_position = Column(VARCHAR(50))
-    # phone = Column(VARCHAR(50))
-    # password_hash = Column(BINARY(32), nullable=False)
     encrypted_private_key = Column(BINARY(48), nullable=False)
     public_key = Column(BINARY(32), nullable=False)
 
@@ -31,9 +27,6 @@ class Group(Base):
     id = Column(INT, primary_key=True, autoincrement=True)
     title = Column(VARCHAR(255), nullable=False)
     description = Column(TEXT, nullable=False)
-    # start_date = Column(DATE)
-    # finish_date = Column(DATE)
-    # encrypted_private_key = Column(BINARY(48), nullable=False)
     public_key = Column(BINARY(32), nullable=False)
 
 
@@ -50,8 +43,6 @@ class GroupUser(Base):
     user_id = Column(ForeignKey(User.id), primary_key=True)
     group_id = Column(ForeignKey(Group.id), primary_key=True)
     role_id = Column(ForeignKey(UserRole.id), nullable=True)
-    # add_date = Column(DATE, nullable=False)
-    # exit_date = Column(DATE)
     encrypted_private_key = Column(BINARY(92), nullable=False)
 
 
@@ -105,6 +96,7 @@ class Log(Base):
     result = Column(INT, nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=True)
     group_id = Column(ForeignKey(Group.id), nullable=True)
+    collection_id = Column(ForeignKey(Collection.id), nullable=True)
 
 
 @event.listens_for(AccessType.__table__, 'after_create')
@@ -498,12 +490,19 @@ class MainBase:
                 session.execute(query)
                 session.commit()
 
-    def add_log(self, action: str, result: int, message: str, user_id: int = None, group_id: int = None):
-        with Session(self.engine) as session:
-            query = insert(Log).values(date_time=datetime.now(), action=action,
-                                       result=result, message=str(message), user_id=user_id, group_id=group_id)
-            session.execute(query)
-            session.commit()
+    def add_log(self, action: str, result: int, message: dict, user_id: int = None, group_id: int = None, collection_id: int = None):
+        try:
+            with Session(self.engine) as session:
+                query = insert(Log).values(date_time=datetime.now(), action=action,
+                                           result=result, message=json.dumps(message), user_id=user_id, group_id=group_id, collection_id=collection_id)
+                session.execute(query)
+                session.commit()
+        except Exception as error:
+            with Session(self.engine) as session:
+                query = insert(Log).values(date_time=datetime.now(), action='add_log',
+                                           result=500, message=json.dumps({'error': error, 'action': action}), user_id=user_id, group_id=group_id)
+                session.execute(query)
+                session.commit()
 
     def get_type_access(self, collection_id: int | str, user_id: int):
         with Session(self.engine) as session:
@@ -592,13 +591,35 @@ class MainBase:
             session.execute(query)
             session.commit()
 
-    def get_logs(self, user_id: int):
+    def get_logs(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id).where(Log.user_id == user_id).limit(500)
+            query = select(Log.id, Log.date_time, Log.action, Log.result,
+                           Log.message, Log.group_id, Log.collection_id).where(Log.user_id == user_id).limit(500)
             result = session.execute(query).all()
             logs = []
             for log in result:
                 logs.append(
-                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': log[4], 'group_id': log[5]})
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6]})
+            logs.reverse()
+            return logs
+
+    def get_history_collection(self, user_id: int, collection_id: int) -> list:
+        with Session(self.engine) as session:
+            query = select(
+                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id
+            ).where(
+                (Log.collection_id == collection_id) &
+                (Log.collection_id.in_(
+                    select(AccessToCollection.collection_id).where(
+                        (AccessToCollection.user_id == user_id) &
+                        (AccessToCollection.type_id == 1)
+                    )
+                ))
+            ).limit(500)
+            result = session.execute(query).all()
+            logs = []
+            for log in result:
+                logs.append(
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6]})
             logs.reverse()
             return logs

@@ -1,9 +1,12 @@
+from datetime import datetime
 from main import app
 from fastapi.testclient import TestClient
+import json
 
 client = TestClient(app)
 
-user1 = {'login': 'user1', 'password': '123', 'token': client.get('/auth', auth=('user1', '123')).json()['token']}
+user1 = {'login': 'user1', 'password': '123', 'token': client.get(
+    '/auth', auth=('user1', '123')).json()['token']}
 
 
 def test_auth():
@@ -27,7 +30,7 @@ def test_false_check_token():
     assert response.status_code == 401
 
 
-def test_auth_log():
+def test_system_logs():
     response = client.get('/auth', auth=(user1['login'], user1['password']))
     assert response.status_code == 200
     token = response.json()['token']
@@ -36,13 +39,5 @@ def test_auth_log():
     last_action = sorted(response.json(), key=lambda x: x['id'])[-1]
     assert last_action['action'] == 'auth'
     assert last_action['result'] == 200
-
-def test_access_log():
-    response = client.get('/auth', auth=(user1['login'], user1['password']))
-    assert response.status_code == 200
-    token = response.json()['token']
-    assert len(token) > 32
-    response = client.get('/get_logs?token=' + token)
-    last_action = sorted(response.json(), key=lambda x: x['id'])[-1]
-    assert last_action['action'] == 'auth'
-    assert last_action['result'] == 200
+    assert last_action['message'] == {'login': 'user1'}
+    assert last_action['date_time'] == datetime.now().isoformat("T", "seconds")

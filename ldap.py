@@ -4,7 +4,7 @@ print(os.getenv('LDAP_PASS'))
 
 
 class LDAPManager:
-    def __init__(self, server_url='ldap.eco.dvo.ru', admin_dn='cn=Manager,dc=eco,dc=dvo,dc=ru', admin_password=os.getenv('LDAP_PASS')):
+    def __init__(self, server_url: str = 'ldap.eco.dvo.ru', admin_dn: str = 'cn=Manager,dc=eco,dc=dvo,dc=ru', admin_password: str = os.getenv('LDAP_PASS')):
         self.server_url = server_url
         self.admin_dn = admin_dn
         self.admin_password = admin_password
@@ -14,7 +14,7 @@ class LDAPManager:
         server = Server(self.server_url, 389, get_info=ALL)
         return Connection(server, self.admin_dn, self.admin_password, auto_bind=True)
 
-    def auth(self, username, password) -> int | None:
+    def auth(self, username: str, password: str) -> int | None:
         try:
             server = Server(self.server_url, get_info=ALL)
             user_dn = f'uid={username},{self.users_base_dn}'
@@ -44,7 +44,7 @@ class LDAPManager:
             print(f'Ошибка аутентификации: {e}')
             return None
 
-    def user_exists(self, username) -> int | None:
+    def user_exists(self, username: str) -> int | None:
         conn = self._get_admin_connection()
         try:
             search_filter = f'(uid={username})'
@@ -63,7 +63,7 @@ class LDAPManager:
         finally:
             conn.unbind()
 
-    def create_user(self, username, password, **attributes) -> str:
+    def create_user(self, username: str, password: str, **attributes) -> str:
         """
         Создание нового пользователя
 
@@ -101,7 +101,7 @@ class LDAPManager:
         finally:
             conn.unbind()
 
-    def update_user(self, username, **attributes):
+    def update_user(self, username: str, **attributes):
         conn = self._get_admin_connection()
         try:
             if not self.user_exists(username):
@@ -119,7 +119,7 @@ class LDAPManager:
         finally:
             conn.unbind()
 
-    def delete_user(self, username):
+    def delete_user(self, username: str):
         """
         Удаление пользователя
 
