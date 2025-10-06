@@ -1,6 +1,6 @@
 from datetime import datetime
 import cryptography
-from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, event, update, func
+from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
@@ -594,19 +594,18 @@ class MainBase:
     def get_logs(self, user_id: int) -> list:
         with Session(self.engine) as session:
             query = select(Log.id, Log.date_time, Log.action, Log.result,
-                           Log.message, Log.group_id, Log.collection_id).where(Log.user_id == user_id).limit(500)
+                           Log.message, Log.group_id, Log.collection_id).where(Log.user_id == user_id).order_by(desc(Log.id)).limit(500)
             result = session.execute(query).all()
             logs = []
             for log in result:
                 logs.append(
                     {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6]})
-            logs.reverse()
             return logs
 
     def get_history_collection(self, user_id: int, collection_id: int) -> list:
         with Session(self.engine) as session:
             query = select(
-                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id
+                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id, User.login,
             ).where(
                 (Log.collection_id == collection_id) &
                 (Log.collection_id.in_(
@@ -614,12 +613,12 @@ class MainBase:
                         (AccessToCollection.user_id == user_id) &
                         (AccessToCollection.type_id == 1)
                     )
-                ))
-            ).limit(500)
+                )) &
+                (User.id == Log.user_id)
+            ).order_by(desc(Log.id)).limit(500)
             result = session.execute(query).all()
             logs = []
             for log in result:
                 logs.append(
-                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6]})
-            logs.reverse()
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6], 'login': log[7]})
             return logs

@@ -106,7 +106,7 @@ class Client:
                     objects_to_delete.append(DeleteObject(object_name))
                 else:
                     objects = client.list_objects(
-                        bucket_name, prefix=object_name, recursive=True)
+                        bucket_name, prefix=object_name + '/', recursive=True)
                     objects_to_delete.extend(
                         [DeleteObject(obj.object_name) for obj in objects]
                     )
@@ -240,7 +240,7 @@ class Client:
                     files_to_download.append(object_name)
                 else:
                     objects = client.list_objects(
-                        bucket_name, prefix=object_name, recursive=True)
+                        bucket_name, prefix=object_name + '/', recursive=True)
 
                     for obj in objects:
                         if not obj.object_name.endswith('/NODATA'):
@@ -284,7 +284,7 @@ class Client:
         for source in source_paths:
             if source.endswith('/'):  # папка
                 try:
-                    prefix = source.strip('/')
+                    prefix = source.strip('/') + '/'
                     objects = client.list_objects(
                         source_bucket_name, prefix=prefix, recursive=True)
                     for obj in objects:
@@ -336,7 +336,7 @@ class Client:
 
         if path.endswith('/'):  # папка
             try:
-                prefix = path.strip('/')
+                prefix = path.strip('/') + '/'
                 objects = client.list_objects(
                     bucket_name, prefix=prefix, recursive=True)
                 for obj in objects:
@@ -372,6 +372,7 @@ class Client:
                     detail=f"Failed copy file '{object_name}': {error.message}"
                 )
 
+        print(path)
         await self.delete_files(bucket_name, [path], access_key, secret_key, sts_token)
 
     async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, overwrite=True):
@@ -505,12 +506,6 @@ class ChangeGroupInfoRequest(BaseModel):
     group_id: int
     title: str
     description: str
-
-
-class ChangeCollectionInfoRequest(BaseModel):
-    token: str
-    collection_id: int
-    json: str
 
 
 app = FastAPI()
