@@ -6,7 +6,7 @@ from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
 from minio.commonconfig import CopySource
-from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, Request
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -940,15 +940,16 @@ async def get_groups(token: str) -> list | None:
 async def remove_collection(token: str, collection_id: int):
     session = web_sessions.get_session(token[:32])
     if session:
+        collection_name = database.get_collection_name(collection_id)
         try:
             await minio.remove_bucket(database.get_collection_name(collection_id), session['access_key'], session['secret_key'], session['sts_token'])
         except HTTPException as error:
             database.add_log('remove_collection', error.status_code, {
-                             'error': error.detail, 'collection_id': collection_id}, user_id=session['user_id'])
+                             'error': error.detail, 'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
             raise error
         database.remove_collection(collection_id, session['user_id'])
         database.add_log('remove_collection', 200, {
-                         'collection_id': collection_id}, user_id=session['user_id'])
+                         'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -1196,20 +1197,27 @@ async def get_history_collection(token: str, collection_id: int) -> list:
         )
 
 
-@app.post('/change_collection_info')  # safe- logs+
+@app.post('/change_collection_info')  # safe+ logs+
 async def change_collection_info(token: str, collection_id: int, data: dict):
+    access = [1]
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        try:
-            opensearch.update_document(collection_id, data)
-            database.add_log('change_collection_info', 200, None,
-                             user_id=user_id, collection_id=collection_id)
-        except Exception as error:
-            database.add_log('change_collection_info', 500, {'error': str(
-                error), 'data': data}, user_id=user_id, collection_id=collection_id)
+        if database.get_type_access(collection_id, user_id) in access:
+            try:
+                opensearch.update_document(collection_id, data)
+                database.add_log('change_collection_info', 200, None,
+                                 user_id=user_id, collection_id=collection_id)
+            except Exception as error:
+                database.add_log('change_collection_info', 500, {'error': str(
+                    error), 'data': data}, user_id=user_id, collection_id=collection_id)
+                raise HTTPException(
+                    status_code=500,
+                    detail=''
+                )
+        else:
             raise HTTPException(
-                status_code=500,
-                detail=''
+                status_code=403,
+                detail='You not owner'
             )
     else:
         raise HTTPException(
@@ -1218,18 +1226,25 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
         )
 
 
-@app.get('/get_collection_info')  # safe- logs+
+@app.get('/get_collection_info')  # safe+ logs+
 async def get_collection_info(token: str, collection_id: int):
+    access = [1, 2, 3, 4]
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
-        try:
-            return opensearch.get_document(collection_id)
-        except Exception as error:
-            database.add_log('get_collection_info', 500, {'error': str(
-                error), 'collection_id': collection_id}, user_id=user_id)
+        if database.get_type_access(collection_id, user_id) in access:
+            try:
+                return opensearch.get_document(collection_id)
+            except Exception as error:
+                database.add_log('get_collection_info', 500, {'error': str(
+                    error), 'collection_id': collection_id}, user_id=user_id)
+                raise HTTPException(
+                    status_code=500,
+                    detail=''
+                )
+        else:
             raise HTTPException(
-                status_code=500,
-                detail=''
+                status_code=403,
+                detail='No access'
             )
     else:
         raise HTTPException(

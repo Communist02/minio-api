@@ -375,13 +375,15 @@ class MainBase:
                     {'id': group[0], 'title': group[1], 'description': group[2], 'role_id': group[3]})
             return groups
 
-    def remove_collection(self, collection_name: str, user_id: int):
+    def remove_collection(self, collection_id: int, user_id: int):
         with Session(self.engine) as session:
             query = select(Collection.id).where(
-                (Collection.name == collection_name) & (AccessToCollection.user_id == user_id) & (AccessToCollection.type_id == 1) & (Collection.id == AccessToCollection.collection_id))
+                (Collection.id == collection_id) & (AccessToCollection.user_id == user_id) & (AccessToCollection.type_id == 1) & (Collection.id == AccessToCollection.collection_id))
             collection_id = session.execute(query).scalar_one()
             query = delete(AccessToCollection).where(
                 AccessToCollection.collection_id == collection_id)
+            session.execute(query)
+            query = delete(Log).where(Log.collection_id == collection_id)
             session.execute(query)
             query = delete(Collection).where(Collection.id == collection_id)
             session.execute(query)
