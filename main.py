@@ -587,7 +587,6 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
-    print(files)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -635,7 +634,7 @@ async def delete_files(collection_id: int, files: str, token: str):
 
 @app.post('/copy')  # access+
 async def copy_files(request: CopyRequest):
-    access = [1, 2]
+    access = [1, 2, 3]
     access_dest = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
     session = web_sessions.get_session(token)
@@ -757,16 +756,14 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
 
 @app.get('/auth')  # safe+ logs+
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
-    user_id = ldap.auth(credentials.username, credentials.password)
-    if user_id is not None:
+    user_id_ldap = ldap.auth(credentials.username, credentials.password)
+    if user_id_ldap is not None:
         user_id_db = database.get_user_id(credentials.username)
         if user_id_db is None:
-            database.add_user(user_id, credentials.username,
-                              credentials.password)
+            user_id_db = database.add_user(
+                credentials.username, credentials.password)
             database.add_log(
-                'new_user', 200, {'login': credentials.username}, user_id=user_id)
-        elif user_id != user_id_db:
-            pass  # Надо сделать обработку такого события
+                'new_user', 200, {'login': credentials.username}, user_id=user_id_db)
     else:
         database.add_log(
             'auth', 401, {'login': credentials.username}, user_id=None)
@@ -780,14 +777,14 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     token = secrets.token_urlsafe(24)[:32]
     temp_auth = get_sts_token(credentials.username, credentials.password)
     web_sessions.add_session(
-        token, hash1, user_id, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
+        token, hash1, user_id_db, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
     database.add_log(
-        'auth', 200, {'login': credentials.username}, user_id=user_id)
+        'auth', 200, {'login': credentials.username}, user_id=user_id_db)
     return {
         'token': token + hash2,
-        'user_id': user_id,
+        'user_id': user_id_ldap,
         'login': credentials.username,
     }
 
@@ -1134,11 +1131,11 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
     if user_id:
         try:
             database.change_access_type(access_id, user_id, access_type_id)
-            database.add_log('change_access_type', 200, f'access_id: {access_id}, access_type_id: {access_type_id}',
+            database.add_log('change_access_type', 200, {'access_id': access_id, 'access_type_id': access_type_id},
                              user_id=user_id)
         except Exception as error:
-            database.add_log('change_access_type', 500, str(
-                error) + f'\naccess_id: {access_id}, access_type_id: {access_type_id}', user_id=user_id)
+            database.add_log('change_access_type', 500, {'error': str(
+                error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=user_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
@@ -1157,11 +1154,11 @@ async def change_group_info(request: ChangeGroupInfoRequest):
         try:
             database.change_group_info(
                 user_id, request.group_id, request.title, request.description)
-            database.add_log('change_group_info', 200, f'title: {request.title}, description: {request.description}',
+            database.add_log('change_group_info', 200, {'title': request.title, 'description': request.description},
                              user_id=user_id, group_id=request.group_id)
         except Exception as error:
-            database.add_log('change_group_info', 500, str(
-                error) + f'\ntitle: {request.title}, description: {request.description}', user_id=user_id, group_id=request.group_id)
+            database.add_log('change_group_info', 500, {'error': str(
+                error), 'title': request.title, 'description': request.description}, user_id=user_id, group_id=request.group_id)
             raise HTTPException(
                 status_code=500,
                 detail=''
@@ -1246,6 +1243,33 @@ async def get_collection_info(token: str, collection_id: int):
                 status_code=403,
                 detail='No access'
             )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/change_access_to_all')  # safe+ logs+
+async def change_access_to_all(token: str, collection_id: int, is_access: bool):
+    token, hash2 = token[:32], token[32:]
+    session = web_sessions.get_session(token)
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) == 1:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            try:
+                database.change_access_to_all(
+                    session['user_id'], collection_id, is_access, key)
+                database.add_log('change_access_to_all', 200, {'is_access': is_access},
+                                 user_id=session['user_id'], collection_id=collection_id)
+            except Exception as error:
+                database.add_log('change_access_to_all', 500, {'error': str(
+                    error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
+                raise HTTPException(
+                    status_code=500,
+                    detail=''
+                )
     else:
         raise HTTPException(
             status_code=401,

@@ -20,7 +20,7 @@ class WebSession(Base):
     last_used: Mapped[datetime] = mapped_column(nullable=False)
     access_key: Mapped[str] = mapped_column(String(20), nullable=False)
     secret_key: Mapped[str] = mapped_column(String(40), nullable=False)
-    sts_token: Mapped[str] = mapped_column(String(400), nullable=False)
+    sts_token: Mapped[str] = mapped_column(String(512), nullable=False)
 
 
 class WebSessionsBase:
