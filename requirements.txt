@@ -1,5 +1,5 @@
 fastapi[standard]
-minio==7.2.15
+minio
 cryptography
 argon2-cffi
 SQLAlchemy

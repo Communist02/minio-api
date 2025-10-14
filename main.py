@@ -2,12 +2,13 @@ import asyncio
 import base64
 import io
 from typing import Annotated
+from urllib import request
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
 from minio.commonconfig import CopySource
-from fastapi import Depends, FastAPI, HTTPException, UploadFile, Request
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, Request
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
@@ -29,36 +30,52 @@ class Client:
         self.endpoint = endpoint
         self.cert_check = False
 
-    async def get_files(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str) -> list[dict]:
+    async def get_list(self, bucket_name: str, path: str, recursive: bool, access_key: str, secret_key: str, sts_token: str) -> list[dict]:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
         try:
-            objects = client.list_objects(bucket_name, recursive=True)
+            if path:
+                prefix = path.strip('/') + '/'
+                objects = await asyncio.to_thread(
+                    client.list_objects,
+                    bucket_name,
+                    recursive=recursive,
+                    prefix=prefix
+                )
+            else:
+                objects = await asyncio.to_thread(
+                    client.list_objects,
+                    bucket_name,
+                    recursive=recursive
+                )
             result = []
             processed_folders = set()
 
             for obj in objects:
                 object_name = obj.object_name
                 if not object_name.endswith('NODATA'):
-                    result.append({
-                        'name': object_name.split("/")[-1],
+                    file = {
+                        'name': obj.object_name[obj.object_name.rfind('/', 0, -1 if obj.is_dir else -2) + 1:],
                         'isDirectory': obj.is_dir,
                         'path': f'/{object_name}',
-                        'updatedAt': obj.last_modified.isoformat(),
                         'size': obj.size,
-                    })
+                    }
+                    if obj.last_modified:
+                        file['updatedAt'] = obj.last_modified.isoformat()
+                    result.append(file)
 
-                current_path = ''
-                for part in object_name.split('/')[:-1]:
-                    current_path += part + '/'
-                    if current_path not in processed_folders:
-                        processed_folders.add(current_path)
-                        result.append({
-                            'name': part,
-                            'isDirectory': True,
-                            'path': f'/{current_path}'.rstrip('/'),
-                        })
+                if recursive:
+                    current_path = ''
+                    for part in object_name.split('/')[:-1]:
+                        current_path += part + '/'
+                        if current_path not in processed_folders:
+                            processed_folders.add(current_path)
+                            result.append({
+                                'name': part,
+                                'isDirectory': True,
+                                'path': f'/{current_path}'.rstrip('/'),
+                            })
             return result
         except S3Error as error:
             print(f'Error fetching files: {error.message}')
@@ -75,7 +92,7 @@ class Client:
                        sts_token, secure=True, cert_check=self.cert_check)
 
         try:
-            buckets = client.list_buckets()
+            buckets = await asyncio.to_thread(client.list_buckets)
             result: list[str] = []
 
             for bucket in buckets:
@@ -105,7 +122,8 @@ class Client:
                 if not path.endswith('/'):
                     objects_to_delete.append(DeleteObject(object_name))
                 else:
-                    objects = client.list_objects(
+                    objects = await asyncio.to_thread(
+                        client.list_objects,
                         bucket_name, prefix=object_name + '/', recursive=True)
                     objects_to_delete.extend(
                         [DeleteObject(obj.object_name) for obj in objects]
@@ -133,26 +151,6 @@ class Client:
                         'message': error.message}
             )
 
-    # async def get_download_url(self, bucket_name: str, object_key: str, encryption_key: SseCustomerKey, expires_seconds: int = 3600) -> str:
-    #     client = self.client
-
-    #     try:
-    #         object_name = object_key.lstrip('/')
-    #         return client.presigned_get_object(
-    #             bucket_name=bucket_name,
-    #             object_name=object_name,
-    #             expires=timedelta(seconds=expires_seconds),
-    #             response_headers={
-    #                 'response-content-type': 'application/octet-stream'},
-    #             extra_query_params=encryption_key.copy_headers(),
-    #         )
-    #     except S3Error as error:
-    #         print(f'Failed to generate download URL: {error.message}')
-    #         raise HTTPException(
-    #             status_code=404 if error.code == 'NoSuchKey' else 500,
-    #             detail=f'Failed to generate download URL: {error.message}'
-    #         )
-
     async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, range_header: str = None) -> StreamingResponse:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
@@ -166,12 +164,10 @@ class Client:
 
         object_name = file_path.lstrip('/')
         try:
-            stat = client.stat_object(
-                bucket_name, object_name, ssec=encryption_key)
+            stat = await asyncio.to_thread(client.stat_object, bucket_name, object_name, ssec=encryption_key)
         except S3Error:
             try:
-                stat = client.stat_object(
-                    bucket_name, object_name)
+                stat = await asyncio.to_thread(client.stat_object, bucket_name, object_name)
                 encryption_key = None
             except S3Error as error:
                 print(f'Failed to get the file: {error.message}')
@@ -191,7 +187,8 @@ class Client:
                 start = int(start_end[0])
                 end = int(start_end[1]) if start_end[1] else file_size - 1
 
-                obj = client.get_object(
+                obj = await asyncio.to_thread(
+                    client.get_object,
                     bucket_name,
                     object_name=object_name,
                     ssec=encryption_key,
@@ -209,7 +206,8 @@ class Client:
                     status_code=206  # Partial Content
                 )
             else:
-                obj = client.get_object(
+                obj = await asyncio.to_thread(
+                    client.get_object,
                     bucket_name,
                     object_name=object_name,
                     ssec=encryption_key
@@ -239,8 +237,12 @@ class Client:
                 if not path.endswith('/'):
                     files_to_download.append(object_name)
                 else:
-                    objects = client.list_objects(
-                        bucket_name, prefix=object_name + '/', recursive=True)
+                    objects = await asyncio.to_thread(
+                        client.list_objects,
+                        bucket_name,
+                        prefix=object_name + '/',
+                        recursive=True
+                    )
 
                     for obj in objects:
                         if not obj.object_name.endswith('/NODATA'):
@@ -253,7 +255,10 @@ class Client:
                 # Оборачиваем поток MinIO в генератор
                 def file_generator(obj_name=obj_name):
                     response = client.get_object(
-                        bucket_name, obj_name, ssec=encryption_key)
+                        bucket_name,
+                        obj_name,
+                        ssec=encryption_key
+                    )
                     try:
                         for chunk in response.stream(1024 * 1024):
                             yield chunk
@@ -262,7 +267,7 @@ class Client:
                         response.release_conn()
 
                 # Добавляем в архив "ленивый" источник данных
-                z.write_iter(obj_name, file_generator())
+                await asyncio.to_thread(z.write_iter, obj_name, file_generator())
 
             # Отдаём как стрим
             return StreamingResponse(
@@ -284,15 +289,20 @@ class Client:
         for source in source_paths:
             if source.endswith('/'):  # папка
                 try:
-                    prefix = source.strip('/') + '/'
-                    objects = client.list_objects(
-                        source_bucket_name, prefix=prefix, recursive=True)
+                    prefix = source.lstrip('/')
+                    objects = await asyncio.to_thread(
+                        client.list_objects,
+                        source_bucket_name,
+                        prefix=prefix,
+                        recursive=True
+                    )
                     for obj in objects:
                         object_name = obj.object_name
-                        relative_path = prefix.split(
-                            '/')[-1] + '/' + object_name[len(prefix):].lstrip('/')
+                        relative_path = prefix.strip(
+                            '/').split('/')[-1] + '/' + object_name[len(prefix):].lstrip('/')
                         destination_object_name = f'{destination_path.rstrip('/')}/{relative_path}'
-                        client.copy_object(
+                        await asyncio.to_thread(
+                            client.copy_object,
                             bucket_name=destination_bucket_name,
                             object_name=destination_object_name,
                             source=CopySource(
@@ -310,7 +320,8 @@ class Client:
                     filename = source.split('/')[-1]
                     destination_object_name = f'{destination_path.rstrip('/')}/{filename}'
                     object_name = source.lstrip('/')
-                    client.copy_object(
+                    await asyncio.to_thread(
+                        client.copy_object,
                         bucket_name=destination_bucket_name,
                         object_name=destination_object_name,
                         source=CopySource(
@@ -337,13 +348,16 @@ class Client:
         if path.endswith('/'):  # папка
             try:
                 prefix = path.strip('/') + '/'
-                objects = client.list_objects(
-                    bucket_name, prefix=prefix, recursive=True)
+                objects = await asyncio.to_thread(
+                    client.list_objects,
+                    bucket_name, prefix=prefix, recursive=True
+                )
                 for obj in objects:
                     object_name = obj.object_name
                     relative_path = object_name[len(prefix):].lstrip('/')
                     destination_object_name = f'{new_object_name}/{relative_path}'
-                    client.copy_object(
+                    await asyncio.to_thread(
+                        client.copy_object,
                         bucket_name=bucket_name,
                         object_name=destination_object_name,
                         source=CopySource(
@@ -358,12 +372,14 @@ class Client:
                 )
         else:  # файл
             try:
-                client.copy_object(
+                await asyncio.to_thread(
+                    client.copy_object,
                     bucket_name=bucket_name,
                     object_name=new_object_name,
                     source=CopySource(bucket_name, object_name,
                                       ssec=encryption_key),
                     sse=encryption_key,
+
                 )
             except S3Error as error:
                 print(f"Failed copy file '{object_name}': {error.message}")
@@ -372,7 +388,6 @@ class Client:
                     detail=f"Failed copy file '{object_name}': {error.message}"
                 )
 
-        print(path)
         await self.delete_files(bucket_name, [path], access_key, secret_key, sts_token)
 
     async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, overwrite=True):
@@ -382,8 +397,12 @@ class Client:
         object_name = path.strip('/') + '/' + file.filename
         if not overwrite:
             try:
-                client.stat_object(bucket_name=bucket_name,
-                                   object_name=object_name, ssec=encryption_key)
+                await asyncio.to_thread(
+                    client.stat_object,
+                    bucket_name=bucket_name,
+                    object_name=object_name,
+                    ssec=encryption_key
+                )
                 raise HTTPException(
                     status_code=403,
                     detail='You cannot overwrite the file'
@@ -404,7 +423,8 @@ class Client:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
 
-        client.put_object(
+        await asyncio.to_thread(
+            client.put_object,
             bucket_name=bucket_name,
             object_name=f'{path.strip('/')}/{name}/NODATA',
             data=io.BytesIO(b''),
@@ -416,7 +436,10 @@ class Client:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
         try:
-            client.make_bucket(bucket_name)
+            await asyncio.to_thread(
+                client.make_bucket,
+                bucket_name
+            )
         except ValueError as error:
             print(f"Failed create bucket '{bucket_name}': {error}")
             raise HTTPException(
@@ -434,7 +457,7 @@ class Client:
         client = Minio(self.endpoint, access_key, secret_key,
                        sts_token, secure=True, cert_check=self.cert_check)
         try:
-            client.remove_bucket(bucket_name)
+            await asyncio.to_thread(client.remove_bucket, bucket_name)
         except S3Error as error:
             print(f"Failed remove bucket '{bucket_name}': {error.message}")
             if error.code == 'BucketNotEmpty':
@@ -525,7 +548,7 @@ opensearch = OpenSearchManager()
 minio = Client(config.url)
 
 
-@app.get('/collections')
+@app.get('/collections/list/{token}')
 async def get_list_collections(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
@@ -537,13 +560,13 @@ async def get_list_collections(token: str) -> list | None:
         )
 
 
-@app.get('/collections/{collection_id}')  # access+
-async def get_list_files(token: str, collection_id: int) -> list | None:
+@app.get('/collections/{collection_id}/list/{token}/{path:path}')  # access+
+async def get_list_files(token: str, collection_id: int, path: str, recursive: bool = True) -> list | None:
     access = [1, 2, 3, 4]
     session = web_sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
-            return await minio.get_files(database.get_collection_name(collection_id), session['access_key'], session['secret_key'], session['sts_token'])
+            return await minio.get_list(database.get_collection_name(collection_id), path, recursive, session['access_key'], session['secret_key'], session['sts_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -556,8 +579,8 @@ async def get_list_files(token: str, collection_id: int) -> list | None:
         )
 
 
-@app.get('/collections/{collection_id}/{file:path}')  # access+
-async def get_file(collection_id: int, file: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
+@app.get('/collections/{collection_id}/file/{token}/{path:path}')  # access+
+async def get_file(collection_id: int, path: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
     session = web_sessions.get_session(token)
@@ -567,9 +590,9 @@ async def get_file(collection_id: int, file: str, token: str, request: Request, 
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            file = file.strip('/')
+            path = path.strip('/')
             range_header = request.headers.get('Range')
-            return await minio.download_file(database.get_collection_name(collection_id), file, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+            return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
         else:
             raise HTTPException(
                 status_code=403,
@@ -582,7 +605,7 @@ async def get_file(collection_id: int, file: str, token: str, request: Request, 
         )
 
 
-@app.get('/archive/collections/{collection_id}')  # access+
+@app.get('/collections/{collection_id}/archive/{token}')  # access+
 async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
@@ -606,7 +629,60 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
         )
 
 
-@app.delete('/collections/{collection_id}')  # access+
+# access+
+@app.get('/collections/{collection_id}/files/{token}', response_class=HTMLResponse)
+@app.get('/collections/{collection_id}/files/{token}/{path:path}', response_class=HTMLResponse)
+@app.head('/collections/{collection_id}/files/{token}/{path:path}')
+async def get_list_files_http(collection_id: int, token: str, request: Request, path: str = ''):
+    access = [1, 2, 3]
+    hash2 = token[32:]
+    session = web_sessions.get_session(token[:32])
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) in access:
+            if path:
+                try:
+                    if not path.endswith('/'):
+                        hash2 = base64.urlsafe_b64decode(hash2.encode())
+                        key = hash_reconstruct(session['hash1'], hash2)
+                        collection_key = database.get_collection_key(
+                            collection_id, session['user_id'], key)
+                        response = await minio.download_file(database.get_collection_name(collection_id), path, True, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=request.headers.get('Range'))
+                        return response
+                except Exception:
+                    if request.method == 'HEAD':
+                        return Response(headers={"Content-Type": "text/html; charset=utf-8", 'Content-Length': '0', 'Location': f'/{quote(path.strip('/'))}/'}, status_code=301)
+
+            files = await minio.get_list(database.get_collection_name(collection_id), path, False, session['access_key'], session['secret_key'], session['sts_token'])
+            html = f'<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><title>Directory listing for /{path}</title></head>'
+            html += f"<body><h1>Directory listing for /{path}</h1><hr><ul>"
+            if path:
+                parent_path = '/'.join(path.strip('/').split('/')[:-1])
+                parent_url = f'/collections/{collection_id}/files/{token}'
+                if parent_path:
+                    parent_url += f'/{parent_path}/'
+                html += f'<li><a href="{parent_url}">../</a></li>'
+
+            for file in files:
+                if file['isDirectory']:
+                    html += f'<li><a href="/collections/{collection_id}/files/{token}{file['path']}">{file["name"]}</a></li>'
+                else:
+                    html += f'<li><a href="/collections/{collection_id}/files/{token}{file['path']}">{file["name"]}</a></li>'
+            html += '</ul><hr></body></html>'
+
+            return HTMLResponse(html)
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.delete('/collections/{collection_id}/{token}')  # access+
 async def delete_files(collection_id: int, files: str, token: str):
     access = [1, 2]
     session = web_sessions.get_session(token[:32])
@@ -723,7 +799,7 @@ async def create_folder(collection_id: int, request: NewFolderRequest):
         )
 
 
-@app.post('/collections/{collection_id}/upload')  # access+
+@app.post('/collections/{collection_id}/upload/{token}/{path:path}')  # access+
 async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
     access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
