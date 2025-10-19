@@ -1,1 +1,2 @@
-url = 'minio-s3-1.eco.dvo.ru:9000'
+minio_url = 'localhost:9000'
+auth_api_url = 'http://localhost:8080'

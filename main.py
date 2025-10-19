@@ -2,17 +2,17 @@ import asyncio
 import base64
 import io
 from typing import Annotated
-from urllib import request
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
 from minio.commonconfig import CopySource
-from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import requests
 from sessions import WebSessionsBase
 from database import MainBase
 from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
@@ -545,7 +545,7 @@ database = MainBase()
 ldap = LDAPManager()
 opensearch = OpenSearchManager()
 
-minio = Client(config.url)
+minio = Client(config.minio_url)
 
 
 @app.get('/collections/list/{token}')
@@ -832,8 +832,17 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
 
 @app.get('/auth')  # safe+ logs+
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
-    user_id_ldap = ldap.auth(credentials.username, credentials.password)
-    if user_id_ldap is not None:
+    username, org = credentials.username.split(
+        '/')[0], credentials.username.split('/')[-1]
+    if org == 'default' or org == '':
+        credentials.username = username
+    response = requests.post(
+        f'{config.auth_api_url}/login?org={org}',
+        auth=(username, credentials.password),
+        verify=False
+    )
+    if response.status_code == 200:
+        jwt_token = response.json()
         user_id_db = database.get_user_id(credentials.username)
         if user_id_db is None:
             user_id_db = database.add_user(
@@ -848,10 +857,18 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
             detail='Incorrect username or password',
             headers={'WWW-Authenticate': 'Basic'},
         )
+    temp_auth = get_sts_token(jwt_token, 'https://' + config.minio_url)
+    if temp_auth is None:
+        database.add_log(
+            'auth', 400, {'login': credentials.username}, user_id=None)
+        raise HTTPException(
+            status_code=400,
+            detail='Incorrect username or password',
+            headers={'WWW-Authenticate': 'Basic'},
+        )
     key = hash_argon2_from_password(credentials.password)
     hash1, hash2 = hash_division(key)
     token = secrets.token_urlsafe(24)[:32]
-    temp_auth = get_sts_token(credentials.username, credentials.password)
     web_sessions.add_session(
         token, hash1, user_id_db, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
     hash2 = base64.urlsafe_b64encode(hash2).decode()
@@ -860,18 +877,27 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         'auth', 200, {'login': credentials.username}, user_id=user_id_db)
     return {
         'token': token + hash2,
-        'user_id': user_id_ldap,
+        'user_id': user_id_db,
         'login': credentials.username,
     }
 
 
-@app.get('/check_token')  # safe+
+@app.get('/check_session')  # safe+
 async def check(token: str) -> dict[str, int | bool]:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return {'authenticated': True, 'user_id': user_id}
     raise HTTPException(status_code=401, detail='Token not found')
 
+
+@app.get('/delete_session')  # safe+
+async def check(token: str) -> bool:
+    user_id = web_sessions.get_user_id(token[:32])
+    if user_id:
+        web_sessions.delete_session(token[:32])
+        return True
+    else:
+        return False
 
 @app.get('/registration')  # develop
 async def registration(login: str, password: str):

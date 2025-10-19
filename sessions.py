@@ -88,3 +88,10 @@ class WebSessionsBase:
                 token=token, hash1=hash1, user_id=user_id, created=datetime.now(), last_used=datetime.now(), access_key=access_key, secret_key=secret_key, sts_token=sts_token)
             session.execute(query)
             session.commit()
+
+    def delete_session(self, token: str) -> int | None:
+        token = hash_argon2_from_password(token)
+        with Session(self.engine) as session:
+            query = delete(WebSession).where(WebSession.token == token)
+            session.execute(query)
+            session.commit()
