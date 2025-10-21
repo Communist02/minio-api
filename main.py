@@ -78,7 +78,12 @@ class Client:
                             })
             return result
         except S3Error as error:
-            print(f'Error fetching files: {error.message}')
+            print(f'Error fetching files: {error.message}, {error.code}')
+            if error.code == 'NoSuchBucket':
+                raise HTTPException(
+                    status_code=410,
+                    detail=f"No such bucket '{bucket_name}': {error.message}"
+                )
             raise HTTPException(
                 status_code=500,
                 detail={
@@ -447,11 +452,17 @@ class Client:
                 detail=f"Failed create bucket '{bucket_name}': {error}"
             )
         except S3Error as error:
-            print(f"Failed create bucket '{bucket_name}': {error.message}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed create bucket '{bucket_name}': {error.message}"
-            )
+            print(f"Failed create bucket '{bucket_name}': {error.message}, {error.code}")
+            if error.code == 'BucketAlreadyExists' or error.code == 'BucketAlreadyOwnedByYou':
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Failed create bucket '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed create bucket '{bucket_name}': {error.message}"
+                )
 
     async def remove_bucket(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str):
         client = Minio(self.endpoint, access_key, secret_key,
@@ -459,10 +470,15 @@ class Client:
         try:
             await asyncio.to_thread(client.remove_bucket, bucket_name)
         except S3Error as error:
-            print(f"Failed remove bucket '{bucket_name}': {error.message}")
+            print(f"Failed remove bucket '{bucket_name}': {error.message}, {error.code}")
             if error.code == 'BucketNotEmpty':
                 raise HTTPException(
                     status_code=406,
+                    detail=f"Failed remove bucket '{bucket_name}': {error.message}"
+                )
+            elif error.code == 'NoSuchBucket':
+                raise HTTPException(
+                    status_code=410,
                     detail=f"Failed remove bucket '{bucket_name}': {error.message}"
                 )
             else:
@@ -863,7 +879,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
             'auth', 400, {'login': credentials.username}, user_id=None)
         raise HTTPException(
             status_code=400,
-            detail='Incorrect username or password',
+            detail='Error create storage token',
             headers={'WWW-Authenticate': 'Basic'},
         )
     key = hash_argon2_from_password(credentials.password)
@@ -1045,7 +1061,8 @@ async def remove_collection(token: str, collection_id: int):
         except HTTPException as error:
             database.add_log('remove_collection', error.status_code, {
                              'error': error.detail, 'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
-            raise error
+            if error.status_code != 410:
+                raise error
         database.remove_collection(collection_id, session['user_id'])
         database.add_log('remove_collection', 200, {
                          'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
@@ -1349,6 +1366,18 @@ async def get_collection_info(token: str, collection_id: int):
         raise HTTPException(
             status_code=401,
             detail='Token invalid'
+        )
+    
+@app.get('/search_collection_info')  # safe+ logs+
+async def search_collection_info(text: str):
+    try:
+        return opensearch.search_documents(text)
+    except Exception as error:
+        database.add_log('search_collection_info', 500, {'error': str(
+            error), 'text': text})
+        raise HTTPException(
+            status_code=500,
+            detail=''
         )
 
 
