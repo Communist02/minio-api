@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import requests
+from policy import create_policy_to_all, create_policy_to_user
 from sessions import WebSessionsBase
 from database import MainBase
 from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
@@ -29,10 +30,13 @@ class Client:
     def __init__(self, endpoint: str):
         self.endpoint = endpoint
         self.cert_check = False
+        self.admin_client = Minio(
+            self.endpoint, 'admin', 'password', secure=True, cert_check=self.cert_check)
 
-    async def get_list(self, bucket_name: str, path: str, recursive: bool, access_key: str, secret_key: str, sts_token: str) -> list[dict]:
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def get_list_files(self, bucket_name: str, path: str, recursive: bool, jwt_token: str) -> list[dict]:
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         try:
             if path:
@@ -84,17 +88,24 @@ class Client:
                     status_code=410,
                     detail=f"No such bucket '{bucket_name}': {error.message}"
                 )
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    'error': 'Failed to retrieve files',
-                    'message': error.message
-                }
-            )
+            elif error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        'error': 'Failed to retrieve files',
+                        'message': error.message
+                    }
+                )
 
-    async def get_buckets(self, access_key: str, secret_key: str, sts_token: str) -> list[str]:
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def get_buckets(self, jwt_token: str) -> list[str]:
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         try:
             buckets = await asyncio.to_thread(client.list_buckets)
@@ -106,17 +117,24 @@ class Client:
             return result
         except S3Error as error:
             print(f'Error fetching files: {error.message}')
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    'error': 'Failed to retrieve files',
-                    'message': error.message
-                }
-            )
+            if error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied: {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        'error': 'Failed to retrieve files',
+                        'message': error.message
+                    }
+                )
 
-    async def delete_files(self, bucket_name: str, paths: list[str], access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def delete_files(self, bucket_name: str, paths: list[str], jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         try:
             objects_to_delete: list[DeleteObject] = []
@@ -150,15 +168,22 @@ class Client:
 
         except S3Error as error:
             print(f'Error deleting files: {error.message}')
-            raise HTTPException(
-                status_code=500,
-                detail={'error': 'S3 error during delete',
-                        'message': error.message}
-            )
+            if error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail={'error': 'S3 error during delete',
+                            'message': error.message}
+                )
 
-    async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, range_header: str = None) -> StreamingResponse:
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, jwt_token: str, range_header: str = None) -> StreamingResponse:
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         async def file_iterator(stream, chunk_size=1024 * 1024):
             while True:
@@ -224,14 +249,21 @@ class Client:
                 )
         except S3Error as error:
             print(f'Failed to get the file: {error.message}')
-            raise HTTPException(
-                status_code=404 if error.code == 'NoSuchKey' else 403,
-                detail=f'Failed to get the file: {error.message}'
-            )
+            if error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=404 if error.code == 'NoSuchKey' else 403,
+                    detail=f'Failed to get the file: {error.message}'
+                )
 
-    async def download_files(self, bucket_name: str, file_paths: list, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str) -> StreamingResponse:
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def download_files(self, bucket_name: str, file_paths: list, encryption_key: SseCustomerKey, jwt_token: str) -> StreamingResponse:
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         files_to_download = []
 
@@ -282,14 +314,21 @@ class Client:
             )
         except S3Error as error:
             print(f'Failed to get the file: {error.message}')
-            raise HTTPException(
-                status_code=404 if error.code == 'NoSuchKey' else 403,
-                detail=f'Failed to get the file: {error.message}'
-            )
+            if error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=404 if error.code == 'NoSuchKey' else 403,
+                    detail=f'Failed to get the file: {error.message}'
+                )
 
-    async def copy_files(self, source_bucket_name: str, source_paths: list[str], destination_bucket_name: str, destination_path: str, source_encryption_key: SseCustomerKey, destination_encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def copy_files(self, source_bucket_name: str, source_paths: list[str], destination_bucket_name: str, destination_path: str, source_encryption_key: SseCustomerKey, destination_encryption_key: SseCustomerKey, jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         for source in source_paths:
             if source.endswith('/'):  # папка
@@ -316,10 +355,16 @@ class Client:
                         )
                 except S3Error as error:
                     print(f"Failed copy folder '{prefix}': {error.message}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed copy folder '{prefix}': {error.message}"
-                    )
+                    if error.code == 'AccessDenied':
+                        raise HTTPException(
+                            status_code=423,
+                            detail=f"Access Denied '{source_bucket_name}' to '{destination_bucket_name}': {error.message}"
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed copy folder '{prefix}': {error.message}"
+                        )
             else:  # файл
                 try:
                     filename = source.split('/')[-1]
@@ -335,14 +380,21 @@ class Client:
                     )
                 except S3Error as error:
                     print(f"Failed copy file '{object_name}': {error.message}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed copy file '{object_name}': {error.message}"
-                    )
+                    if error.code == 'AccessDenied':
+                        raise HTTPException(
+                            status_code=423,
+                            detail=f"Access Denied '{source_bucket_name}' to '{destination_bucket_name}': {error.message}"
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed copy file '{object_name}': {error.message}"
+                        )
 
-    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         object_name = path.strip('/')
         new_object_name = object_name[:-
@@ -371,10 +423,16 @@ class Client:
                     )
             except S3Error as error:
                 print(f"Failed copy folder '{prefix}': {error.message}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed copy folder '{prefix}': {error.message}"
-                )
+                if error.code == 'AccessDenied':
+                    raise HTTPException(
+                        status_code=423,
+                        detail=f"Access Denied '{bucket_name}': {error.message}"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed copy folder '{prefix}': {error.message}"
+                    )
         else:  # файл
             try:
                 await asyncio.to_thread(
@@ -388,16 +446,23 @@ class Client:
                 )
             except S3Error as error:
                 print(f"Failed copy file '{object_name}': {error.message}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed copy file '{object_name}': {error.message}"
-                )
+                if error.code == 'AccessDenied':
+                    raise HTTPException(
+                        status_code=423,
+                        detail=f"Access Denied '{bucket_name}': {error.message}"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed copy file '{object_name}': {error.message}"
+                    )
 
-        await self.delete_files(bucket_name, [path], access_key, secret_key, sts_token)
+        await self.delete_files(bucket_name, [path], jwt_token)
 
-    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str, overwrite=True):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, jwt_token: str, overwrite=True):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
         object_name = path.strip('/') + '/' + file.filename
         if not overwrite:
@@ -424,22 +489,36 @@ class Client:
             sse=encryption_key,
         )
 
-    async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey, jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
+        try:
+            await asyncio.to_thread(
+                client.put_object,
+                bucket_name=bucket_name,
+                object_name=f'{path.strip('/')}/{name}/NODATA',
+                data=io.BytesIO(b''),
+                length=0,
+                sse=encryption_key,
+            )
+        except S3Error as error:
+            if error.code == 'AccessDenied':
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Access Denied '{bucket_name}': {error.message}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed create folder '{name}': {error.message}"
+                )
 
-        await asyncio.to_thread(
-            client.put_object,
-            bucket_name=bucket_name,
-            object_name=f'{path.strip('/')}/{name}/NODATA',
-            data=io.BytesIO(b''),
-            length=0,
-            sse=encryption_key,
-        )
+    async def create_bucket(self, bucket_name: str, jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
 
-    async def create_bucket(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
         try:
             await asyncio.to_thread(
                 client.make_bucket,
@@ -452,7 +531,8 @@ class Client:
                 detail=f"Failed create bucket '{bucket_name}': {error}"
             )
         except S3Error as error:
-            print(f"Failed create bucket '{bucket_name}': {error.message}, {error.code}")
+            print(
+                f"Failed create bucket '{bucket_name}': {error.message}, {error.code}")
             if error.code == 'BucketAlreadyExists' or error.code == 'BucketAlreadyOwnedByYou':
                 raise HTTPException(
                     status_code=409,
@@ -464,13 +544,16 @@ class Client:
                     detail=f"Failed create bucket '{bucket_name}': {error.message}"
                 )
 
-    async def remove_bucket(self, bucket_name: str, access_key: str, secret_key: str, sts_token: str):
-        client = Minio(self.endpoint, access_key, secret_key,
-                       sts_token, secure=True, cert_check=self.cert_check)
+    async def remove_bucket(self, bucket_name: str, jwt_token: str):
+        auth = get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
+                       auth['session_token'], secure=True, cert_check=self.cert_check)
+
         try:
             await asyncio.to_thread(client.remove_bucket, bucket_name)
         except S3Error as error:
-            print(f"Failed remove bucket '{bucket_name}': {error.message}, {error.code}")
+            print(
+                f"Failed remove bucket '{bucket_name}': {error.message}, {error.code}")
             if error.code == 'BucketNotEmpty':
                 raise HTTPException(
                     status_code=406,
@@ -582,7 +665,7 @@ async def get_list_files(token: str, collection_id: int, path: str, recursive: b
     session = web_sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
-            return await minio.get_list(database.get_collection_name(collection_id), path, recursive, session['access_key'], session['secret_key'], session['sts_token'])
+            return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -608,7 +691,7 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
                 collection_id, session['user_id'], key)
             path = path.strip('/')
             range_header = request.headers.get('Range')
-            return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=range_header)
+            return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
         else:
             raise HTTPException(
                 status_code=403,
@@ -632,7 +715,7 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+            return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
         else:
             raise HTTPException(
                 status_code=403,
@@ -662,13 +745,13 @@ async def get_list_files_http(collection_id: int, token: str, request: Request, 
                         key = hash_reconstruct(session['hash1'], hash2)
                         collection_key = database.get_collection_key(
                             collection_id, session['user_id'], key)
-                        response = await minio.download_file(database.get_collection_name(collection_id), path, True, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], range_header=request.headers.get('Range'))
+                        response = await minio.download_file(database.get_collection_name(collection_id), path, True, SseCustomerKey(collection_key), session['jwt_token'], range_header=request.headers.get('Range'))
                         return response
                 except Exception:
                     if request.method == 'HEAD':
                         return Response(headers={"Content-Type": "text/html; charset=utf-8", 'Content-Length': '0', 'Location': f'/{quote(path.strip('/'))}/'}, status_code=301)
 
-            files = await minio.get_list(database.get_collection_name(collection_id), path, False, session['access_key'], session['secret_key'], session['sts_token'])
+            files = await minio.get_list_files(database.get_collection_name(collection_id), path, False, session['jwt_token'])
             html = f'<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><title>Directory listing for /{path}</title></head>'
             html += f"<body><h1>Directory listing for /{path}</h1><hr><ul>"
             if path:
@@ -707,7 +790,7 @@ async def delete_files(collection_id: int, files: str, token: str):
             collection_id, session['user_id'])
         files = files.split('|')
         if access_type in access:
-            await minio.delete_files(database.get_collection_name(collection_id), files, session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.delete_files(database.get_collection_name(collection_id), files, session['jwt_token'])
             database.add_log(
                 'delete', 200, {'files': files}, user_id=session['user_id'], collection_id=collection_id)
         else:
@@ -738,7 +821,7 @@ async def copy_files(request: CopyRequest):
                 request.source_collection_id, session['user_id'], key)
             destination_collection_key = database.get_collection_key(
                 request.destination_collection_id, session['user_id'], key)
-            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, database.get_collection_name(request.destination_collection_id), request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, database.get_collection_name(request.destination_collection_id), request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
             database.add_log('copy', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
                              'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
         else:
@@ -768,7 +851,7 @@ async def rename_file(collection_id: int, request: RenameRequest):
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            await minio.rename_file(database.get_collection_name(collection_id), request.path, request.new_name, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.rename_file(database.get_collection_name(collection_id), request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
             database.add_log(
                 'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
         else:
@@ -798,7 +881,7 @@ async def create_folder(collection_id: int, request: NewFolderRequest):
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['jwt_token'])
             database.add_log(
                 'create_folder', 200, {'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
         else:
@@ -828,7 +911,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['access_key'], session['secret_key'], session['sts_token'], overwrite=access_type != 4)
+            await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
             return file.filename
@@ -859,12 +942,12 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     )
     if response.status_code == 200:
         jwt_token = response.json()
-        user_id_db = database.get_user_id(credentials.username)
-        if user_id_db is None:
-            user_id_db = database.add_user(
+        user_id = database.get_user_id(credentials.username)
+        if user_id is None:
+            user_id = database.add_user(
                 credentials.username, credentials.password)
             database.add_log(
-                'new_user', 200, {'login': credentials.username}, user_id=user_id_db)
+                'new_user', 200, {'login': credentials.username}, user_id=user_id)
     else:
         database.add_log(
             'auth', 401, {'login': credentials.username}, user_id=None)
@@ -873,27 +956,20 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
             detail='Incorrect username or password',
             headers={'WWW-Authenticate': 'Basic'},
         )
-    temp_auth = get_sts_token(jwt_token, 'https://' + config.minio_url)
-    if temp_auth is None:
-        database.add_log(
-            'auth', 400, {'login': credentials.username}, user_id=None)
-        raise HTTPException(
-            status_code=400,
-            detail='Error create storage token',
-            headers={'WWW-Authenticate': 'Basic'},
-        )
     key = hash_argon2_from_password(credentials.password)
     hash1, hash2 = hash_division(key)
     token = secrets.token_urlsafe(24)[:32]
     web_sessions.add_session(
-        token, hash1, user_id_db, temp_auth['access_key'], temp_auth['secret_key'], temp_auth['sts_token'])
+        token, hash1, user_id, jwt_token)
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
+    create_policy_to_user(username, database.get_collections(user_id))
+
     database.add_log(
-        'auth', 200, {'login': credentials.username}, user_id=user_id_db)
+        'auth', 200, {'login': credentials.username}, user_id=user_id)
     return {
         'token': token + hash2,
-        'user_id': user_id_db,
+        'user_id': user_id,
         'login': credentials.username,
     }
 
@@ -902,6 +978,8 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
 async def check(token: str) -> dict[str, int | bool]:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
+        create_policy_to_user(database.get_username(user_id),
+                              database.get_collections(user_id))
         return {'authenticated': True, 'user_id': user_id}
     raise HTTPException(status_code=401, detail='Token not found')
 
@@ -915,21 +993,19 @@ async def check(token: str) -> bool:
     else:
         return False
 
-@app.get('/registration')  # develop
-async def registration(login: str, password: str):
-    database.add_user(login, password)
-
 
 @app.post('/create_collection')  # safe+ logs+
 async def create_collection(request: CreateCollectionRequest):
     session = web_sessions.get_session(request.token[:32])
     if session:
         try:
-            await minio.create_bucket(request.name, session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.create_bucket(request.name, session['jwt_token'])
             collection_id = database.create_collection(
                 request.name, session['user_id'])
             database.add_log('create_collection', 200,
                              {'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+            create_policy_to_user(database.get_username(
+                session['user_id']), database.get_collections(session['user_id']))
         except HTTPException as error:
             database.add_log('create_collection', error.status_code,
                              {'error': error.detail, 'name': request.name}, user_id=session['user_id'])
@@ -954,6 +1030,8 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
                 request.collection_id, user_id, request.user_id, request.access_type_id, key)
             database.add_log('give_access_user_to_collection',
                              200, {'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
+            create_policy_to_user(database.get_username(request.user_id),
+                                  database.get_collections(user_id))
         except Exception as error:
             database.add_log('give_access_user_to_collection',
                              500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
@@ -1057,7 +1135,7 @@ async def remove_collection(token: str, collection_id: int):
     if session:
         collection_name = database.get_collection_name(collection_id)
         try:
-            await minio.remove_bucket(database.get_collection_name(collection_id), session['access_key'], session['secret_key'], session['sts_token'])
+            await minio.remove_bucket(database.get_collection_name(collection_id), session['jwt_token'])
         except HTTPException as error:
             database.add_log('remove_collection', error.status_code, {
                              'error': error.detail, 'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
@@ -1066,6 +1144,8 @@ async def remove_collection(token: str, collection_id: int):
         database.remove_collection(collection_id, session['user_id'])
         database.add_log('remove_collection', 200, {
                          'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
+        create_policy_to_user(database.get_username(
+            session['user_id']), database.get_collections(session['user_id']))
     else:
         raise HTTPException(
             status_code=401,
@@ -1195,6 +1275,8 @@ async def exit_group(token: str, group_id: int):
             database.delete_user_to_group(group_id, user_id, user_id)
             database.add_log('exit_group', 200, {},
                              user_id=user_id, group_id=group_id)
+            create_policy_to_user(database.get_username(user_id),
+                                  database.get_collections(user_id))
         except Exception as error:
             database.add_log('exit_group', 500, {'error': str(error)},
                              user_id=user_id, group_id=group_id)
@@ -1367,7 +1449,8 @@ async def get_collection_info(token: str, collection_id: int):
             status_code=401,
             detail='Token invalid'
         )
-    
+
+
 @app.get('/search_collection_info')  # safe+ logs+
 async def search_collection_info(text: str):
     try:
@@ -1394,6 +1477,8 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
                     session['user_id'], collection_id, is_access, key)
                 database.add_log('change_access_to_all', 200, {'is_access': is_access},
                                  user_id=session['user_id'], collection_id=collection_id)
+                create_policy_to_all(
+                    database.get_absolute_access_to_all_collections(session['user_id']))
             except Exception as error:
                 database.add_log('change_access_to_all', 500, {'error': str(
                     error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)

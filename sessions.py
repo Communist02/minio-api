@@ -1,5 +1,9 @@
+import base64
 from datetime import datetime, timedelta
+from email.mime import base
+import json
 from typing import Tuple
+import jwt
 from sqlalchemy import BINARY, update, delete, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy import create_engine, select, insert
@@ -18,9 +22,7 @@ class WebSession(Base):
     user_id: Mapped[int] = mapped_column(nullable=False)
     created: Mapped[datetime] = mapped_column(nullable=False)
     last_used: Mapped[datetime] = mapped_column(nullable=False)
-    access_key: Mapped[str] = mapped_column(String(20), nullable=False)
-    secret_key: Mapped[str] = mapped_column(String(40), nullable=False)
-    sts_token: Mapped[str] = mapped_column(String(512), nullable=False)
+    jwt_token: Mapped[str] = mapped_column(String(1024), nullable=False)
 
 
 class WebSessionsBase:
@@ -47,11 +49,11 @@ class WebSessionsBase:
         token = hash_argon2_from_password(token)
         self.remove_deprecation()
         with Session(self.engine) as session:
-            query = select(WebSession.user_id, WebSession.hash1, WebSession.access_key, WebSession.secret_key, WebSession.sts_token).where(WebSession.token == token)
+            query = select(WebSession.user_id, WebSession.hash1, WebSession.jwt_token).where(WebSession.token == token)
             result = session.execute(query).first().tuple()
             if result is not None:
                 self.update_last_used(token)
-                return {'user_id': result[0], 'hash1': result[1], 'access_key': result[2], 'secret_key': result[3], 'sts_token': result[4]}
+                return {'user_id': result[0], 'hash1': result[1], 'jwt_token': result[2]}
 
     def get_user_id(self, token: str) -> int | None:
         token = hash_argon2_from_password(token)
@@ -81,11 +83,11 @@ class WebSessionsBase:
                 WebSession.token == token)
             return session.execute(query).first().tuple()
 
-    def add_session(self, token: str, hash1: bytes, user_id: str, access_key: str, secret_key: str, sts_token: str):
+    def add_session(self, token: str, hash1: bytes, user_id: str, jwt_token: str):
         token = hash_argon2_from_password(token)
         with Session(self.engine) as session:
             query = insert(WebSession).values(
-                token=token, hash1=hash1, user_id=user_id, created=datetime.now(), last_used=datetime.now(), access_key=access_key, secret_key=secret_key, sts_token=sts_token)
+                token=token, hash1=hash1, user_id=user_id, created=datetime.now(), last_used=datetime.now(), jwt_token=jwt_token)
             session.execute(query)
             session.commit()
 

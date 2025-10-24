@@ -4,6 +4,8 @@ from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT,
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
+
+from sqlalchemy.sql.functions import user
 import crypt
 import json
 
@@ -182,7 +184,6 @@ class MainBase:
                     Collection.name == collection_id)
                 collection_id = session.execute(query).scalar_one()
 
-
             query = select(AccessToCollection.encrypted_key).where(
                 (AccessToCollection.collection_id == collection_id) & (AccessToCollection.user_id == user_id))
             encrypted_key = session.execute(query).scalar_one_or_none()
@@ -190,27 +191,26 @@ class MainBase:
                 collection_key = crypt.asym_decrypt_key(
                     encrypted_key, user_private_key)
             else:
-                
-                    query = select(GroupUser.group_id).where(
-                        GroupUser.user_id == user_id)
-                    groups_result = session.execute(query).all()
-                    groups = []
-                    for group in groups_result:
-                        groups.append(group[0])
-                    query = select(AccessToCollection.encrypted_key, AccessToCollection.group_id).where(
-                        (AccessToCollection.collection_id == collection_id) & (AccessToCollection.group_id.in_(groups)))
-                    result = session.execute(query).first()
-                    if result is not None:
-                        encrypted_key = result[0]
-                        group_id = result[1]
-                        group_private_key = self.get_group_private_key(
-                            group_id, user_id, key)
-                        collection_key = crypt.asym_decrypt_key(
-                            encrypted_key, group_private_key)
-                    else:
-                        query = select(Collection.encrypt_key).where(
-                            (Collection.id == collection_id) & (Collection.encrypt_key).is_not(None))
-                        collection_key = session.execute(query).scalar_one()
+                query = select(GroupUser.group_id).where(
+                    GroupUser.user_id == user_id)
+                groups_result = session.execute(query).all()
+                groups = []
+                for group in groups_result:
+                    groups.append(group[0])
+                query = select(AccessToCollection.encrypted_key, AccessToCollection.group_id).where(
+                    (AccessToCollection.collection_id == collection_id) & (AccessToCollection.group_id.in_(groups)))
+                result = session.execute(query).first()
+                if result is not None:
+                    encrypted_key = result[0]
+                    group_id = result[1]
+                    group_private_key = self.get_group_private_key(
+                        group_id, user_id, key)
+                    collection_key = crypt.asym_decrypt_key(
+                        encrypted_key, group_private_key)
+                else:
+                    query = select(Collection.encrypt_key).where(
+                        (Collection.id == collection_id) & (Collection.encrypt_key).is_not(None))
+                    collection_key = session.execute(query).scalar_one()
             return collection_key
 
     def get_group_private_key(self, group_id: int, user_id: int, key: bytes) -> bytes:
@@ -229,6 +229,12 @@ class MainBase:
             user_id = session.execute(query).scalar()
             return user_id
 
+    def get_username(self, user_id: int) -> int:
+        with Session(self.engine) as session:
+            query = select(User.login).where(User.id == user_id)
+            username = session.execute(query).scalar()
+            return username
+
     def get_collections(self, user_id: int) -> list:
         owner = self.get_owner_collections(user_id)
         accessed = self.get_access_collections(user_id)
@@ -244,7 +250,7 @@ class MainBase:
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(
-                    {'id': collection[0], 'name': collection[1], 'type': 'person', 'access_type_id': collection[2], 'is_access_all': collection[3] != None})
+                    {'id': collection[0], 'name': collection[1], 'type': 'owner', 'access_type_id': collection[2], 'is_access_all': collection[3] is not None})
             return result
 
     def get_access_collections(self, user_id: int) -> list:
@@ -295,6 +301,17 @@ class MainBase:
                     )
                 ))
             )
+            collections = session.execute(query).all()
+            for collection in collections:
+                result.append(
+                    {'id': collection[0], 'name': collection[1], 'type': 'access_to_all', 'access_type_id': 3})
+            return result
+
+    def get_absolute_access_to_all_collections(self, user_id: int) -> list:
+        result = []
+        with Session(self.engine) as session:
+            query = select(Collection.id, Collection.name).where(
+                Collection.encrypt_key.is_not(None))
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(
@@ -667,15 +684,15 @@ class MainBase:
                     collection_id, user_id, key)
                 query = update(Collection).where(
                     (Collection.id == collection_id) &
+                    (Collection.id == AccessToCollection.collection_id) &
                     (AccessToCollection.user_id == user_id) &
-                    (AccessToCollection.collection_id == collection_id) &
                     (AccessToCollection.type_id == 1)
                 ).values(encrypt_key=collection_key)
             else:
                 query = update(Collection).where(
                     (Collection.id == collection_id) &
+                    (Collection.id == AccessToCollection.collection_id) &
                     (AccessToCollection.user_id == user_id) &
-                    (AccessToCollection.collection_id == collection_id) &
                     (AccessToCollection.type_id == 1)
                 ).values(encrypt_key=None)
             session.execute(query)
