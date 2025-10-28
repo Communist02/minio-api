@@ -12,10 +12,7 @@ def create_policy_to_user(username: str, collections: list) -> str:
     }
     default_policy = {
         'Effect': 'Allow',
-        'Action': [
-            's3:CreateBucket',
-            's3:ListAllMyBuckets'
-        ],
+        'Action': ['s3:CreateBucket'],
         'Resource': ['arn:aws:s3:::*']
     }
     policy['Statement'].append(default_policy)
@@ -47,9 +44,7 @@ def create_policy_to_user(username: str, collections: list) -> str:
                         's3:PutObject'
                     ]
             bucket_policy['Resource'] = [
-                f'arn:aws:s3:::{collection['name']}',
-                f'arn:aws:s3:::{collection['name']}/*'
-            ]
+                f'arn:aws:s3:::{collection['name']}/*']
             policy['Statement'].append(bucket_policy)
 
     auth = AWSRequestsAuth(
@@ -82,9 +77,7 @@ def create_policy_to_all(collections: list) -> str:
     }
     default_policy = {
         'Effect': 'Allow',
-        'Action': [
-            's3:ListAllMyBuckets',
-        ],
+        'Action': ['s3:CreateBucket'],
         'Resource': ['arn:aws:s3:::*']
     }
     policy['Statement'].append(default_policy)
@@ -96,10 +89,7 @@ def create_policy_to_all(collections: list) -> str:
             's3:GetObject',
             's3:ListBucket'
         ]
-        bucket_policy['Resource'] = [
-            f'arn:aws:s3:::{collection['name']}',
-            f'arn:aws:s3:::{collection['name']}/*'
-        ]
+        bucket_policy['Resource'] = [f'arn:aws:s3:::{collection['name']}/*']
         policy['Statement'].append(bucket_policy)
 
     # date = datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')

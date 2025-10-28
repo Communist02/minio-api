@@ -970,7 +970,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     return {
         'token': token + hash2,
         'user_id': user_id,
-        'login': credentials.username,
+        'username': credentials.username,
     }
 
 
@@ -1031,7 +1031,7 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
             database.add_log('give_access_user_to_collection',
                              200, {'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
             create_policy_to_user(database.get_username(request.user_id),
-                                  database.get_collections(user_id))
+                                  database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('give_access_user_to_collection',
                              500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
@@ -1082,6 +1082,9 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
                 request.collection_id, user_id, request.group_id, request.access_type_id, key)
             database.add_log('give_access_group_to_collection',
                              200, {'access_id': access_id}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
+            for user in database.get_group_users(request.group_id, user_id):
+                create_policy_to_user(
+                    user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('give_access_group_to_collection',
                              500, {'error': str(error)}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
@@ -1108,6 +1111,8 @@ async def add_user_to_group(request: AddUserToGroupRequest):
                 request.group_id, user_id, request.user_id, request.role_id, key)
             database.add_log('add_user_to_group', 200,
                              {'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
+            create_policy_to_user(database.get_username(request.user_id),
+                                  database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('add_user_to_group', 500, {'error': str(
                 error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
@@ -1182,9 +1187,17 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         try:
+            access_info = database.get_access_info(access_id)
             database.delete_access_to_collection(access_id, user_id)
             database.add_log('delete_access_to_collection', 200, {
                              'access_id': access_id}, user_id=user_id)
+            if access_info['user_id'] is not None:
+                create_policy_to_user(database.get_username(access_info['user_id']),
+                                      database.get_collections(access_info['user_id']))
+            elif access_info['group_id'] is not None:
+                for user in database.get_group_users(access_info['group_id'], user_id):
+                    create_policy_to_user(
+                        user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('delete_access_to_collection', 500, {
                              'error': str(error), 'access_id': access_id}, user_id=user_id)
@@ -1207,6 +1220,8 @@ async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list 
             database.delete_user_to_group(group_id, user_id, req_user_id)
             database.add_log('delete_user_to_group', 200, {
                              'user_id': user_id}, user_id=req_user_id, group_id=group_id)
+            create_policy_to_user(database.get_username(
+                user_id), database.get_collections(user_id))
         except Exception as error:
             database.add_log('delete_user_to_group', 500, {'error': str(
                 error), 'user_id': user_id}, user_id=req_user_id, group_id=group_id)
@@ -1334,6 +1349,14 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
             database.change_access_type(access_id, user_id, access_type_id)
             database.add_log('change_access_type', 200, {'access_id': access_id, 'access_type_id': access_type_id},
                              user_id=user_id)
+            access_info = database.get_access_info(access_id)
+            if access_info['user_id'] is not None:
+                create_policy_to_user(database.get_username(access_info['user_id']),
+                                      database.get_collections(access_info['user_id']))
+            elif access_info['group_id'] is not None:
+                for user in database.get_group_users(access_info['group_id'], user_id):
+                    create_policy_to_user(
+                        user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('change_access_type', 500, {'error': str(
                 error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=user_id)

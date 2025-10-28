@@ -440,7 +440,7 @@ class MainBase:
             result = session.execute(query).all()
             users = []
             for user in result:
-                users.append({'id': user[0], 'login': user[1]})
+                users.append({'id': user[0], 'username': user[1]})
             return users
 
     def get_access_to_collection(self, collection_id: int, user_id: int) -> list:
@@ -507,7 +507,7 @@ class MainBase:
             users = []
             for user in result:
                 users.append(
-                    {'id': user[0], 'login': user[1], 'role_id': user[2]})
+                    {'id': user[0], 'username': user[1], 'role_id': user[2]})
             return users
 
     def get_access_types(self) -> list:
@@ -605,7 +605,7 @@ class MainBase:
             query = select(func.count('*')).select_from(AccessToCollection).where(
                 (AccessToCollection.user_id == user_id) & (AccessToCollection.type_id == 1))
             count_collections = session.execute(query).scalar_one()
-            result = {'id': user.id, 'login': user.login,
+            result = {'id': user.id, 'username': user.login,
                       'count_collections': count_collections}
             return result
 
@@ -620,7 +620,6 @@ class MainBase:
             if access_type_id != 1:
                 query = update(AccessToCollection).where(
                     (AccessToCollection.id == access_id) &
-                    (AccessToCollection.user_id != user_id) &
                     (AccessToCollection.collection_id.in_(
                         select(AccessToCollection.collection_id).where(
                             (AccessToCollection.user_id == user_id) &
@@ -630,6 +629,13 @@ class MainBase:
                 ).values(type_id=access_type_id)
                 session.execute(query)
                 session.commit()
+
+    def get_access_info(self, access_id: int) -> str:
+        with Session(self.engine) as session:
+            query = select(AccessToCollection.user_id, AccessToCollection.group_id).where(
+                AccessToCollection.id == access_id)
+            result = session.execute(query).one()
+            return {'user_id': result.user_id, 'group_id': result.group_id}
 
     def change_group_info(self, user_id: int, group_id: int, title: str, description: str) -> bool:
         with Session(self.engine) as session:
@@ -674,7 +680,7 @@ class MainBase:
             logs = []
             for log in result:
                 logs.append(
-                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6], 'login': log[7]})
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6], 'username': log[7]})
             return logs
 
     def change_access_to_all(self, user_id: int, collection_id: int, is_access: bool, key: bytes):

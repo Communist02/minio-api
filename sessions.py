@@ -50,7 +50,10 @@ class WebSessionsBase:
         self.remove_deprecation()
         with Session(self.engine) as session:
             query = select(WebSession.user_id, WebSession.hash1, WebSession.jwt_token).where(WebSession.token == token)
-            result = session.execute(query).first().tuple()
+            result = session.execute(query).first()
+            if result is None:
+                return None
+            result = result.tuple()
             if result is not None:
                 self.update_last_used(token)
                 return {'user_id': result[0], 'hash1': result[1], 'jwt_token': result[2]}
