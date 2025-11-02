@@ -1,20 +1,22 @@
 from opensearchpy import NotFoundError, OpenSearch
 
+import config
+
 # auth = ('admin', os.getenv('OPENSEARCH_PASS'))
 # For testing only. Don't store credentials in code.
 auth = ('admin', 'OTFiZDkwMGRiOWQw1!')
 
 
 class OpenSearchManager:
-    def __init__(self, host: str = 'elastic-1.eco.dvo.ru', port: int = 9200, auth: tuple = auth):
+    def __init__(self, host: str = config.open_search_host, port: int = config.open_search_port, auth: tuple = auth):
         self.client = OpenSearch(
             hosts=[{'host': host, 'port': port}],
-            http_compress=True,  # enables gzip compression for request bodies
+            http_compress=True,
             http_auth=auth,
             use_ssl=True,
-            verify_certs=False,
-            ssl_assert_hostname=False,
-            ssl_show_warn=False,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode,
         )
 
     # Не работает
@@ -22,25 +24,25 @@ class OpenSearchManager:
         response = self.client.indices.create(
             index=index_name)
 
-    def update_document(self, collection_id: int, document: dict, index_name: str = 's3-storage'):
+    def update_document(self, doc_id: int, document: dict, index_name: str = 's3-storage'):
         response = self.client.index(
             index=index_name,
             body=document,
-            id=collection_id,
+            id=doc_id,
             refresh=True,
         )
 
-    def delete_document(self, collection_id: int, index_name: str = 's3-storage'):
+    def delete_document(self, doc_id: int, index_name: str = 's3-storage'):
         response = self.client.delete(
             index=index_name,
-            id=collection_id,
+            id=doc_id,
         )
 
-    def get_document(self, collection_id: int, index_name: str = 's3-storage') -> dict | None:
+    def get_document(self, doc_id: int, index_name: str = 's3-storage') -> dict | None:
         try:
             response = self.client.get(
                 index=index_name,
-                id=collection_id,
+                id=doc_id,
             )
             return response['_source']
         except NotFoundError:

@@ -1,7 +1,6 @@
 import json
 from aws_requests_auth.aws_auth import AWSRequestsAuth
 import requests
-
 import config
 
 
@@ -61,7 +60,7 @@ def create_policy_to_user(username: str, collections: list) -> str:
         headers={'Content-Type': 'application/json'},
         auth=auth,
         json=policy,
-        verify=False,
+        verify=not config.debug_mode,
         timeout=5
     )
     if response.status_code != 200:
@@ -107,7 +106,7 @@ def create_policy_to_all(collections: list) -> str:
         headers={'Content-Type': 'application/json'},
         auth=auth,
         json=policy,
-        verify=False,
+        verify=not config.debug_mode,
         timeout=5
     )
     if response.status_code != 200:

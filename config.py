@@ -1,4 +1,9 @@
 minio_url = 'localhost:9000'
 auth_api_url = 'http://localhost:8080'
+index_api_url = 'http://localhost:8010'
 access_key = 'admin'
 secret_key = 'password'
+debug_mode = True
+open_search_host = 'elastic-1.eco.dvo.ru'
+open_search_port = 9200
+open_search_files_index = 'collections-files'

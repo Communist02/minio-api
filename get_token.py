@@ -1,11 +1,14 @@
 import requests
 import xml.etree.ElementTree as ET
 
+import config
+
 
 def get_sts_token(token: str, endpoint: str, duration=2592000):
     response = requests.post(
-        f'{endpoint}/?Action=AssumeRoleWithWebIdentity&WebIdentityToken={token}&Version=2011-06-15{f"&DurationSeconds={duration}" if duration != 0 else ""}',
-        verify=False,
+        f'{endpoint}/{f"?DurationSeconds={duration}" if duration != 0 else ""}',
+        params={'Action': 'AssumeRoleWithWebIdentity', 'WebIdentityToken': token, 'Version': '2011-06-15'},
+        verify=not config.debug_mode,
         timeout=5
     )
 
@@ -24,6 +27,7 @@ def get_sts_token(token: str, endpoint: str, duration=2592000):
         return credentials
     else:
         print('Ошибка получения STS токена:', response.status_code)
-        print(token)
-        print(response.text)
-        print(response.status_code)
+        if config.debug_mode:
+            print(token)
+            print(response.text)
+            print(response.status_code)
