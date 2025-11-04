@@ -78,6 +78,11 @@ class ChangeGroupInfoRequest(BaseModel):
     description: str
 
 
+class SpecificListCollectionsRequest(BaseModel):
+    token: str
+    collection_ids: list[int]
+
+
 app = FastAPI()
 security = HTTPBasic()
 app.add_middleware(
@@ -99,6 +104,18 @@ async def get_list_collections(token: str) -> list | None:
     user_id = web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_collections(user_id)
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.post('/collections/specific_list')
+async def get_specific_list_collections(request: SpecificListCollectionsRequest) -> list:
+    user_id = web_sessions.get_user_id(request.token[:32])
+    if user_id:
+        return database.get_specific_access_to_all_collections(user_id, request.collection_ids)
     else:
         raise HTTPException(
             status_code=401,
@@ -361,7 +378,8 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            create_metadata(collection_id, database.get_collection_name(collection_id), jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
+            create_metadata(collection_id, database.get_collection_name(
+                collection_id), jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
             return file.filename
         else:
             database.add_log(
@@ -920,9 +938,10 @@ async def get_collection_info(token: str, collection_id: int):
             status_code=401,
             detail='Token invalid'
         )
-    
 
-@app.get('/collections/{collection_id}/file_info/{token}/{path:path}')  # safe+ logs+
+
+# safe+ logs+
+@app.get('/collections/{collection_id}/file_info/{token}/{path:path}')
 async def get_file_info(token: str, collection_id: int, path: str):
     access = [1, 2, 3, 4]
     user_id = web_sessions.get_user_id(token[:32])
@@ -949,13 +968,26 @@ async def get_file_info(token: str, collection_id: int, path: str):
         )
 
 
-@app.get('/search_collection_info')  # safe+ logs+
-async def search_collection_info(text: str):
+@app.get('/search_collections')  # safe+ logs+
+async def search_collection(text: str, token: str = None) -> list:
+    if token is not None:
+        user_id = web_sessions.get_user_id(token[:32])
+    else:
+        user_id = None
+    # Тут специально нет проверки user_id
     try:
-        return opensearch.search_documents(text)
+        collections = []
+        documents = opensearch.search_documents(text)
+        for document in documents:
+            collection = database.get_specific_access_to_all_collections(
+                user_id, [document['_id']])
+            if len(collection) > 0:
+                collection[0]['index'] = document['_source']
+                collections.append(collection[0])
+        return collections
     except Exception as error:
         database.add_log('search_collection_info', 500, {'error': str(
-            error), 'text': text})
+            error), 'text': text}, user_id=user_id)
         raise HTTPException(
             status_code=500,
             detail=''
@@ -976,7 +1008,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
                 database.add_log('change_access_to_all', 200, {'is_access': is_access},
                                  user_id=session['user_id'], collection_id=collection_id)
                 create_policy_to_all(
-                    database.get_absolute_access_to_all_collections(session['user_id']))
+                    database.get_absolute_access_to_all_collections())
             except Exception as error:
                 database.add_log('change_access_to_all', 500, {'error': str(
                     error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)

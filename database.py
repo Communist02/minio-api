@@ -239,8 +239,8 @@ class MainBase:
         owner = self.get_owner_collections(user_id)
         accessed = self.get_access_collections(user_id)
         group = self.get_group_collections(user_id)
-        accessed_to_all = self.get_access_to_all_collections(user_id)
-        return owner + accessed + group + accessed_to_all
+        # accessed_to_all = self.get_access_to_all_collections(user_id)
+        return owner + accessed + group
 
     def get_owner_collections(self, user_id: int) -> list:
         result = []
@@ -306,8 +306,30 @@ class MainBase:
                 result.append(
                     {'id': collection[0], 'name': collection[1], 'type': 'access_to_all', 'access_type_id': 3})
             return result
+        
+    def get_specific_access_to_all_collections(self, user_id: int, collection_ids: list[int]) -> list:
+        result = []
+        with Session(self.engine) as session:
+            query = select(Collection.id, Collection.name).where(
+                (Collection.encrypt_key.is_not(None)) &
+                (Collection.id.in_(collection_ids)) &
+                (Collection.id.not_in(
+                    select(AccessToCollection.collection_id).where(
+                        (AccessToCollection.user_id == user_id) |
+                        (AccessToCollection.group_id.in_(
+                            select(GroupUser.group_id).where(
+                                GroupUser.user_id == user_id)
+                        ))
+                    )
+                ))
+            )
+            collections = session.execute(query).all()
+            for collection in collections:
+                result.append(
+                    {'id': collection[0], 'name': collection[1], 'type': 'access_to_all', 'access_type_id': 3})
+            return result
 
-    def get_absolute_access_to_all_collections(self, user_id: int) -> list:
+    def get_absolute_access_to_all_collections(self) -> list:
         result = []
         with Session(self.engine) as session:
             query = select(Collection.id, Collection.name).where(

@@ -48,13 +48,12 @@ class OpenSearchManager:
         except NotFoundError:
             return None
 
-    def search_documents(self, text: str, fields: list = ['name', 'description', 'tags'], index_name: str = 's3-storage'):
+    def search_documents(self, text: str, fields: list = ['title', 'description', 'tags', 'collection_id', 'collection_name'], index_name: str = 's3-storage'):
         query = {
-            'size': 5,
             'query': {
-                'multi_match': {
-                    'query': text,
-                    'fields': fields
+                'query_string': {
+                    'query': f'*{text}*',
+                    'default_operator': 'OR'
                 }
             }
         }
