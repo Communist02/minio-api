@@ -1,14 +1,12 @@
-import requests
+import httpx
 import xml.etree.ElementTree as ET
-
 import config
 
 
-def get_sts_token(token: str, endpoint: str, duration=2592000):
-    response = requests.post(
+async def get_sts_token(token: str, endpoint: str, duration=2592000):
+    response = await httpx.AsyncClient(verify=not config.debug_mode).post(
         f'{endpoint}/{f"?DurationSeconds={duration}" if duration != 0 else ""}',
         params={'Action': 'AssumeRoleWithWebIdentity', 'WebIdentityToken': token, 'Version': '2011-06-15'},
-        verify=not config.debug_mode,
         timeout=5
     )
 

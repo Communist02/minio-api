@@ -4,8 +4,9 @@ cryptography
 argon2-cffi
 SQLAlchemy
 pymysql
+asyncmy
 ldap3
 requests
 zipstream
-opensearch-py
-aws-requests-auth
+opensearch-py[async]
+httpx-aws-auth

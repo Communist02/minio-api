@@ -1,4 +1,5 @@
 import base64
+from contextlib import asynccontextmanager
 from typing import Annotated
 from minio.sse import SseCustomerKey
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
@@ -7,7 +8,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-import requests
+import httpx
 from metadata import create_metadata
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -82,8 +83,20 @@ class SpecificListCollectionsRequest(BaseModel):
     token: str
     collection_ids: list[int]
 
+web_sessions = WebSessionsBase()
+database = MainBase()
+opensearch = OpenSearchManager()
+minio = MinIOClient(config.minio_url)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Инициализация при запуске
+    await web_sessions.initialize()
+    yield
+    # Завершение при остановке
+    await web_sessions.close()
+
+app = FastAPI(lifespan=lifespan)
 security = HTTPBasic()
 app.add_middleware(
     CORSMiddleware,
@@ -92,16 +105,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_headers=["*"]
 )
-web_sessions = WebSessionsBase()
-database = MainBase()
-opensearch = OpenSearchManager()
-
-minio = MinIOClient(config.minio_url)
 
 
 @app.get('/collections/list/{token}')
 async def get_list_collections(token: str) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_collections(user_id)
     else:
@@ -113,7 +121,7 @@ async def get_list_collections(token: str) -> list | None:
 
 @app.post('/collections/specific_list')
 async def get_specific_list_collections(request: SpecificListCollectionsRequest) -> list:
-    user_id = web_sessions.get_user_id(request.token[:32])
+    user_id = await web_sessions.get_user_id(request.token[:32])
     if user_id:
         return database.get_specific_access_to_all_collections(user_id, request.collection_ids)
     else:
@@ -126,7 +134,7 @@ async def get_specific_list_collections(request: SpecificListCollectionsRequest)
 @app.get('/collections/{collection_id}/list/{token}/{path:path}')  # access+
 async def get_list_files(token: str, collection_id: int, path: str, recursive: bool = True) -> list | None:
     access = [1, 2, 3, 4]
-    session = web_sessions.get_session(token[:32])
+    session = await web_sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
@@ -146,7 +154,7 @@ async def get_list_files(token: str, collection_id: int, path: str, recursive: b
 async def get_file(collection_id: int, path: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -172,7 +180,7 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
 async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -199,7 +207,7 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
 async def get_list_files_http(collection_id: int, token: str, request: Request, path: str = ''):
     access = [1, 2, 3]
     hash2 = token[32:]
-    session = web_sessions.get_session(token[:32])
+    session = await web_sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             if path:
@@ -248,7 +256,7 @@ async def get_list_files_http(collection_id: int, token: str, request: Request, 
 @app.delete('/collections/{collection_id}/{token}')  # access+
 async def delete_files(collection_id: int, files: str, token: str):
     access = [1, 2]
-    session = web_sessions.get_session(token[:32])
+    session = await web_sessions.get_session(token[:32])
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -276,7 +284,7 @@ async def copy_files(request: CopyRequest):
     access = [1, 2, 3]
     access_dest = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -306,7 +314,7 @@ async def copy_files(request: CopyRequest):
 async def rename_file(collection_id: int, request: RenameRequest):
     access = [1, 2]
     token, hash2 = request.token[:32], request.token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -336,7 +344,7 @@ async def rename_file(collection_id: int, request: RenameRequest):
 async def create_folder(collection_id: int, request: NewFolderRequest):
     access = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -366,7 +374,7 @@ async def create_folder(collection_id: int, request: NewFolderRequest):
 async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
     access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -378,7 +386,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            create_metadata(collection_id, database.get_collection_name(
+            await create_metadata(collection_id, database.get_collection_name(
                 collection_id), jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
             return file.filename
         else:
@@ -401,10 +409,9 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
         '/')[0], credentials.username.split('/')[-1]
     if org == 'default' or org == '':
         credentials.username = username
-    response = requests.post(
+    response = await httpx.AsyncClient(verify=not config.debug_mode).post(
         f'{config.auth_api_url}/login?org={org}',
-        auth=(username, credentials.password),
-        verify=not config.debug_mode
+        auth=(username, credentials.password)
     )
     if response.status_code == 200:
         jwt_token = response.json()
@@ -425,11 +432,11 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     key = hash_argon2_from_password(credentials.password)
     hash1, hash2 = hash_division(key)
     token = secrets.token_urlsafe(24)[:32]
-    web_sessions.add_session(
+    await web_sessions.add_session(
         token, hash1, user_id, jwt_token)
     hash2 = base64.urlsafe_b64encode(hash2).decode()
 
-    create_policy_to_user(username, database.get_collections(user_id))
+    await create_policy_to_user(username, database.get_collections(user_id))
 
     database.add_log(
         'auth', 200, {'login': credentials.username}, user_id=user_id)
@@ -442,19 +449,19 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
 
 @app.get('/check_session')  # safe+
 async def check(token: str) -> dict[str, int | bool]:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
-        create_policy_to_user(database.get_username(user_id),
-                              database.get_collections(user_id))
+        await create_policy_to_user(database.get_username(user_id),
+                                    database.get_collections(user_id))
         return {'authenticated': True, 'user_id': user_id}
     raise HTTPException(status_code=401, detail='Token not found')
 
 
 @app.get('/delete_session')  # safe+
 async def check(token: str) -> bool:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
-        web_sessions.delete_session(token[:32])
+        await web_sessions.delete_session(token[:32])
         return True
     else:
         return False
@@ -462,7 +469,7 @@ async def check(token: str) -> bool:
 
 @app.post('/create_collection')  # safe+ logs+
 async def create_collection(request: CreateCollectionRequest):
-    session = web_sessions.get_session(request.token[:32])
+    session = await web_sessions.get_session(request.token[:32])
     if session:
         try:
             await minio.create_bucket(request.name, session['jwt_token'])
@@ -470,7 +477,7 @@ async def create_collection(request: CreateCollectionRequest):
                 request.name, session['user_id'])
             database.add_log('create_collection', 200,
                              {'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-            create_policy_to_user(database.get_username(
+            await create_policy_to_user(database.get_username(
                 session['user_id']), database.get_collections(session['user_id']))
         except HTTPException as error:
             database.add_log('create_collection', error.status_code,
@@ -487,7 +494,7 @@ async def create_collection(request: CreateCollectionRequest):
 @app.post('/give_access_user_to_collection')  # safe+ access- logs+
 async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
@@ -496,8 +503,8 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
                 request.collection_id, user_id, request.user_id, request.access_type_id, key)
             database.add_log('give_access_user_to_collection',
                              200, {'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
-            create_policy_to_user(database.get_username(request.user_id),
-                                  database.get_collections(request.user_id))
+            await create_policy_to_user(database.get_username(request.user_id),
+                                        database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('give_access_user_to_collection',
                              500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
@@ -515,7 +522,7 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
 @app.post('/create_group')  # safe+ logs+
 async def create_group(request: CreateGroupRequest):
     token = request.token[:32]
-    user_id = web_sessions.get_user_id(token)
+    user_id = await web_sessions.get_user_id(token)
     if user_id:
         try:
             group_id = database.create_group(
@@ -539,7 +546,7 @@ async def create_group(request: CreateGroupRequest):
 @app.post('/give_access_group_to_collection')  # safe+ access- logs+
 async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
@@ -549,7 +556,7 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
             database.add_log('give_access_group_to_collection',
                              200, {'access_id': access_id}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
             for user in database.get_group_users(request.group_id, user_id):
-                create_policy_to_user(
+                await create_policy_to_user(
                     user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('give_access_group_to_collection',
@@ -568,7 +575,7 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
 @app.post('/add_user_to_group')  # safe+ logs+
 async def add_user_to_group(request: AddUserToGroupRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = web_sessions.get_hash1_and_user_id(token)
+    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
     if user_id:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
         key = hash_reconstruct(hash1, hash2)
@@ -577,8 +584,8 @@ async def add_user_to_group(request: AddUserToGroupRequest):
                 request.group_id, user_id, request.user_id, request.role_id, key)
             database.add_log('add_user_to_group', 200,
                              {'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
-            create_policy_to_user(database.get_username(request.user_id),
-                                  database.get_collections(request.user_id))
+            await create_policy_to_user(database.get_username(request.user_id),
+                                        database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('add_user_to_group', 500, {'error': str(
                 error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
@@ -595,7 +602,7 @@ async def add_user_to_group(request: AddUserToGroupRequest):
 
 @app.get('/get_groups')  # safe+
 async def get_groups(token: str) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_groups(user_id)
 
@@ -615,7 +622,7 @@ async def remove_collection(token: str, collection_id: int):
         database.remove_collection(collection_id, session['user_id'])
         database.add_log('remove_collection', 200, {
                          'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
-        create_policy_to_user(database.get_username(
+        await create_policy_to_user(database.get_username(
             session['user_id']), database.get_collections(session['user_id']))
     else:
         raise HTTPException(
@@ -626,7 +633,7 @@ async def remove_collection(token: str, collection_id: int):
 
 @app.get('/get_other_users')  # safe+
 async def get_other_users(token: str) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_other_users(user_id)
     else:
@@ -638,7 +645,7 @@ async def get_other_users(token: str) -> list | None:
 
 @app.get('/get_access_to_collection')  # safe+
 async def get_access_to_collection(token: str, collection_id: int) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_access_to_collection(collection_id, user_id)
     else:
@@ -650,7 +657,7 @@ async def get_access_to_collection(token: str, collection_id: int) -> list | Non
 
 @app.delete('/delete_access_to_collection')  # safe+ logs+
 async def delete_access_to_collection(token: str, access_id: int) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         try:
             access_info = database.get_access_info(access_id)
@@ -658,11 +665,11 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
             database.add_log('delete_access_to_collection', 200, {
                              'access_id': access_id}, user_id=user_id)
             if access_info['user_id'] is not None:
-                create_policy_to_user(database.get_username(access_info['user_id']),
-                                      database.get_collections(access_info['user_id']))
+                await create_policy_to_user(database.get_username(access_info['user_id']),
+                                            database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
                 for user in database.get_group_users(access_info['group_id'], user_id):
-                    create_policy_to_user(
+                    await create_policy_to_user(
                         user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('delete_access_to_collection', 500, {
@@ -680,13 +687,13 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
 
 @app.delete('/delete_user_to_group')  # safe+ logs+
 async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list | None:
-    req_user_id = web_sessions.get_user_id(token[:32])
+    req_user_id = await web_sessions.get_user_id(token[:32])
     if req_user_id:
         try:
             database.delete_user_to_group(group_id, user_id, req_user_id)
             database.add_log('delete_user_to_group', 200, {
                              'user_id': user_id}, user_id=req_user_id, group_id=group_id)
-            create_policy_to_user(database.get_username(
+            await create_policy_to_user(database.get_username(
                 user_id), database.get_collections(user_id))
         except Exception as error:
             database.add_log('delete_user_to_group', 500, {'error': str(
@@ -704,7 +711,7 @@ async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list 
 
 @app.get('/get_group_users')  # safe+
 async def get_group_users(token: str, group_id: int) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_group_users(group_id, user_id)
     else:
@@ -716,7 +723,7 @@ async def get_group_users(token: str, group_id: int) -> list | None:
 
 @app.get('/get_access_types')  # safe+
 async def get_access_types(token: str) -> list | None:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_access_types()
     else:
@@ -728,7 +735,7 @@ async def get_access_types(token: str) -> list | None:
 
 @app.post('/transfer_power_to_group')  # safe+
 async def transfer_power_to_group(token: str, group_id: int, user_id: int):
-    owner_user_id = web_sessions.get_user_id(token[:32])
+    owner_user_id = await web_sessions.get_user_id(token[:32])
     if owner_user_id:
         try:
             database.transfer_power_to_group(group_id, owner_user_id, user_id)
@@ -750,14 +757,14 @@ async def transfer_power_to_group(token: str, group_id: int, user_id: int):
 
 @app.delete('/exit_group')  # safe+ logs+
 async def exit_group(token: str, group_id: int):
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         try:
             database.delete_user_to_group(group_id, user_id, user_id)
             database.add_log('exit_group', 200, {},
                              user_id=user_id, group_id=group_id)
-            create_policy_to_user(database.get_username(user_id),
-                                  database.get_collections(user_id))
+            await create_policy_to_user(database.get_username(user_id),
+                                        database.get_collections(user_id))
         except Exception as error:
             database.add_log('exit_group', 500, {'error': str(error)},
                              user_id=user_id, group_id=group_id)
@@ -774,7 +781,7 @@ async def exit_group(token: str, group_id: int):
 
 @app.post('/change_role_in_group')  # safe+ logs+
 async def change_role_in_group(token: str, group_id: int, user_id: int, role_id: int):
-    owner_user_id = web_sessions.get_user_id(token[:32])
+    owner_user_id = await web_sessions.get_user_id(token[:32])
     if owner_user_id:
         try:
             database.change_role_in_group(
@@ -797,7 +804,7 @@ async def change_role_in_group(token: str, group_id: int, user_id: int, role_id:
 
 @app.get('/get_user_info')  # safe+
 async def get_user_info(token: str) -> dict[str, int | str]:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_user_info(user_id)
     else:
@@ -809,7 +816,7 @@ async def get_user_info(token: str) -> dict[str, int | str]:
 
 @app.post('/change_access_type')  # safe+ logs+
 async def change_access_type(token: str, access_id: int, access_type_id: int):
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         try:
             database.change_access_type(access_id, user_id, access_type_id)
@@ -817,11 +824,11 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
                              user_id=user_id)
             access_info = database.get_access_info(access_id)
             if access_info['user_id'] is not None:
-                create_policy_to_user(database.get_username(access_info['user_id']),
-                                      database.get_collections(access_info['user_id']))
+                await create_policy_to_user(database.get_username(access_info['user_id']),
+                                            database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
                 for user in database.get_group_users(access_info['group_id'], user_id):
-                    create_policy_to_user(
+                    await create_policy_to_user(
                         user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('change_access_type', 500, {'error': str(
@@ -839,7 +846,7 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
 
 @app.post('/change_group_info')  # safe+ logs+
 async def change_group_info(request: ChangeGroupInfoRequest):
-    user_id = web_sessions.get_user_id(request.token[:32])
+    user_id = await web_sessions.get_user_id(request.token[:32])
     if user_id:
         try:
             database.change_group_info(
@@ -862,7 +869,7 @@ async def change_group_info(request: ChangeGroupInfoRequest):
 
 @app.get('/get_logs')  # safe+
 async def get_logs(token: str) -> list:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_logs(user_id)
     else:
@@ -874,7 +881,7 @@ async def get_logs(token: str) -> list:
 
 @app.get('/get_history_collection')  # safe+
 async def get_history_collection(token: str, collection_id: int) -> list:
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         return database.get_history_collection(user_id, collection_id)
     else:
@@ -887,11 +894,11 @@ async def get_history_collection(token: str, collection_id: int) -> list:
 @app.post('/change_collection_info')  # safe+ logs+
 async def change_collection_info(token: str, collection_id: int, data: dict):
     access = [1]
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         if database.get_type_access(collection_id, user_id) in access:
             try:
-                opensearch.update_document(collection_id, data)
+                await opensearch.update_document(collection_id, data)
                 database.add_log('change_collection_info', 200, None,
                                  user_id=user_id, collection_id=collection_id)
             except Exception as error:
@@ -916,11 +923,11 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
 @app.get('/get_collection_info')  # safe+ logs+
 async def get_collection_info(token: str, collection_id: int):
     access = [1, 2, 3, 4]
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         if database.get_type_access(collection_id, user_id) in access:
             try:
-                return opensearch.get_document(collection_id)
+                return await opensearch.get_document(collection_id)
             except Exception as error:
                 database.add_log('get_collection_info', 500, {'error': str(
                     error)}, user_id=user_id, collection_id=collection_id)
@@ -944,11 +951,11 @@ async def get_collection_info(token: str, collection_id: int):
 @app.get('/collections/{collection_id}/file_info/{token}/{path:path}')
 async def get_file_info(token: str, collection_id: int, path: str):
     access = [1, 2, 3, 4]
-    user_id = web_sessions.get_user_id(token[:32])
+    user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         if database.get_type_access(collection_id, user_id) in access:
             try:
-                return opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.open_search_files_index)
+                return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.open_search_files_index)
             except Exception as error:
                 database.add_log('get_file_info', 500, {'error': str(
                     error), 'path': path}, user_id=user_id, collection_id=collection_id)
@@ -971,13 +978,13 @@ async def get_file_info(token: str, collection_id: int, path: str):
 @app.get('/search_collections')  # safe+ logs+
 async def search_collection(text: str, token: str = None) -> list:
     if token is not None:
-        user_id = web_sessions.get_user_id(token[:32])
+        user_id = await web_sessions.get_user_id(token[:32])
     else:
         user_id = None
     # Тут специально нет проверки user_id
     try:
         collections = []
-        documents = opensearch.search_documents(text)
+        documents = await opensearch.search_documents(text)
         for document in documents:
             collection = database.get_specific_access_to_all_collections(
                 user_id, [document['_id']])
@@ -997,7 +1004,7 @@ async def search_collection(text: str, token: str = None) -> list:
 @app.post('/change_access_to_all')  # safe+ logs+
 async def change_access_to_all(token: str, collection_id: int, is_access: bool):
     token, hash2 = token[:32], token[32:]
-    session = web_sessions.get_session(token)
+    session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) == 1:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -1007,7 +1014,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
                     session['user_id'], collection_id, is_access, key)
                 database.add_log('change_access_to_all', 200, {'is_access': is_access},
                                  user_id=session['user_id'], collection_id=collection_id)
-                create_policy_to_all(
+                await create_policy_to_all(
                     database.get_absolute_access_to_all_collections())
             except Exception as error:
                 database.add_log('change_access_to_all', 500, {'error': str(

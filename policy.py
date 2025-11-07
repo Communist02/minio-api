@@ -1,10 +1,10 @@
 import json
-from aws_requests_auth.aws_auth import AWSRequestsAuth
-import requests
+from httpx_aws_auth import AwsSigV4Auth, AwsCredentials
+import httpx
 import config
 
 
-def create_policy_to_user(username: str, collections: list) -> str:
+async def create_policy_to_user(username: str, collections: list) -> str:
     policy = {
         'Version': '2012-10-17',
         'Statement': []
@@ -46,21 +46,17 @@ def create_policy_to_user(username: str, collections: list) -> str:
                 f'arn:aws:s3:::{collection['name']}/*']
             policy['Statement'].append(bucket_policy)
 
-    auth = AWSRequestsAuth(
-        aws_access_key=config.access_key,
-        aws_secret_access_key=config.secret_key,
-        aws_host=config.minio_url,
-        aws_region='us-east-1',
-        aws_service='s3'
+    auth = AwsSigV4Auth(
+        credentials=AwsCredentials(config.access_key, config.secret_key),
+        region='us-east-1',
+        service='s3'
     )
-    print(policy)
-    response = requests.put(
+    response = await httpx.AsyncClient(verify=not config.debug_mode).put(
         f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
         params={'name': username},
         headers={'Content-Type': 'application/json'},
         auth=auth,
         json=policy,
-        verify=not config.debug_mode,
         timeout=5
     )
     if response.status_code != 200:
@@ -69,7 +65,7 @@ def create_policy_to_user(username: str, collections: list) -> str:
     return json.dumps(policy)
 
 
-def create_policy_to_all(collections: list) -> str:
+async def create_policy_to_all(collections: list) -> str:
     policy = {
         'Version': '2012-10-17',
         'Statement': []
@@ -92,21 +88,17 @@ def create_policy_to_all(collections: list) -> str:
         policy['Statement'].append(bucket_policy)
 
     # date = datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
-    auth = AWSRequestsAuth(
-        aws_access_key=config.access_key,
-        aws_secret_access_key=config.secret_key,
-        aws_host=config.minio_url,
-        aws_region='us-east-1',
-        aws_service='s3'
+    auth = AwsSigV4Auth(
+        credentials=AwsCredentials(config.access_key, config.secret_key),
+        region='us-east-1',
+        service='s3'
     )
-    print(policy)
-    response = requests.put(
+    response = await httpx.AsyncClient(verify=not config.debug_mode).put(
         f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
         params={'name': 'all/system'},
         headers={'Content-Type': 'application/json'},
         auth=auth,
         json=policy,
-        verify=not config.debug_mode,
         timeout=5
     )
     if response.status_code != 200:
