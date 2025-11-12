@@ -83,10 +83,12 @@ class SpecificListCollectionsRequest(BaseModel):
     token: str
     collection_ids: list[int]
 
+
 web_sessions = WebSessionsBase()
 database = MainBase()
 opensearch = OpenSearchManager()
 minio = MinIOClient(config.minio_url)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -405,8 +407,12 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
 
 @app.get('/auth')  # safe+ logs+
 async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
-    username, org = credentials.username.split(
-        '/')[0], credentials.username.split('/')[-1]
+    username = credentials.username.strip('/')
+    if username.find('/') == -1:
+        org = 'default'
+    else:
+        username, org = credentials.username.split(
+            '/')[0], credentials.username.split('/')[-1]
     if org == 'default' or org == '':
         credentials.username = username
     response = await httpx.AsyncClient(verify=not config.debug_mode).post(
@@ -976,6 +982,35 @@ async def get_file_info(token: str, collection_id: int, path: str):
 
 
 @app.get('/search_collections')  # safe+ logs+
+async def search_collection(text: str, token: str) -> list:
+    if token is not None:
+        session = await web_sessions.get_session(token[:32])
+        # Тут специально нет проверки user_id
+        try:
+            collections = []
+            documents = await opensearch.search_documents(text, jwt_token=session['jwt_token'])
+            for document in documents:
+                collection = database.get_specific_access_to_all_collections(
+                    session['user_id'], [document['_id']])
+                if len(collection) > 0:
+                    collection[0]['index'] = document['_source']
+                    collections.append(collection[0])
+            return collections
+        except Exception as error:
+            database.add_log('search_collection_info', 500, {'error': str(
+                error), 'text': text}, user_id=session['user_id'])
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+
+@app.get('/search_collection_files')  # safe+ logs+
 async def search_collection(text: str, token: str = None) -> list:
     if token is not None:
         user_id = await web_sessions.get_user_id(token[:32])
@@ -983,17 +1018,13 @@ async def search_collection(text: str, token: str = None) -> list:
         user_id = None
     # Тут специально нет проверки user_id
     try:
-        collections = []
-        documents = await opensearch.search_documents(text)
+        files = []
+        documents = await opensearch.search_documents(text, index_name=config.open_search_files_index)
         for document in documents:
-            collection = database.get_specific_access_to_all_collections(
-                user_id, [document['_id']])
-            if len(collection) > 0:
-                collection[0]['index'] = document['_source']
-                collections.append(collection[0])
-        return collections
+            files.append(document['_source'])
+        return files
     except Exception as error:
-        database.add_log('search_collection_info', 500, {'error': str(
+        database.add_log('search_collection_files', 500, {'error': str(
             error), 'text': text}, user_id=user_id)
         raise HTTPException(
             status_code=500,

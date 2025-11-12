@@ -2,6 +2,7 @@ import json
 from httpx_aws_auth import AwsSigV4Auth, AwsCredentials
 import httpx
 import config
+from opensearch import OpenSearchManager
 
 
 async def create_policy_to_user(username: str, collections: list) -> str:
@@ -16,9 +17,35 @@ async def create_policy_to_user(username: str, collections: list) -> str:
     }
     policy['Statement'].append(default_policy)
 
+    opensearch_policy = {
+        "cluster_permissions": [],
+        "index_permissions": [{
+            "index_patterns": [
+                config.open_search_collections_index,
+                config.open_search_files_index
+            ],
+            "allowed_actions": [
+                "read",
+                "search",
+                "get"
+            ],
+            "dls": {
+                "bool": {
+                    "should": []
+                }
+            }
+        }]
+    }
+
     for collection in collections:
         if collection['type'] != 'access_to_all':
+            opensearch_policy['index_permissions'][0]['dls']['bool']['should'].append({
+                'term': {
+                    'collection_id': collection['id']
+                }
+            })
             bucket_policy = {'Effect': 'Allow'}
+
             match collection['access_type_id']:
                 case 1:
                     bucket_policy['Action'] = ['s3:*']
@@ -46,6 +73,12 @@ async def create_policy_to_user(username: str, collections: list) -> str:
                 f'arn:aws:s3:::{collection['name']}/*']
             policy['Statement'].append(bucket_policy)
 
+    # opensearch['index_permissions'][0]['dls'] = {
+    #     "bool": {
+    #         "should": [{"term": {"collection_id": cid}} for cid in dls]
+    #     }
+    # }
+
     auth = AwsSigV4Auth(
         credentials=AwsCredentials(config.access_key, config.secret_key),
         region='us-east-1',
@@ -62,6 +95,12 @@ async def create_policy_to_user(username: str, collections: list) -> str:
     if response.status_code != 200:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
+
+    opensearch_policy['index_permissions'][0]['dls'] = str(
+        opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
+    print(opensearch_policy['index_permissions'][0]['dls'])
+    opensearch = OpenSearchManager()
+    await opensearch.create_policy_to_user(username, opensearch_policy)
     return json.dumps(policy)
 
 
@@ -77,7 +116,33 @@ async def create_policy_to_all(collections: list) -> str:
     }
     policy['Statement'].append(default_policy)
 
+    opensearch_policy = {
+        "cluster_permissions": [],
+        "index_permissions": [{
+            "index_patterns": [
+                config.open_search_collections_index,
+                config.open_search_files_index
+            ],
+            "allowed_actions": [
+                "read",
+                "search",
+                "get"
+            ],
+            "dls": {
+                "bool": {
+                    "should": []
+                }
+            }
+        }]
+    }
+
     for collection in collections:
+        opensearch_policy['index_permissions'][0]['dls']['bool']['should'].append({
+            'term': {
+                'collection_id': collection['id']
+            }
+        })
+
         bucket_policy = {'Effect': 'Allow'}
         bucket_policy['Action'] = [
             's3:GetBucketLocation',
@@ -104,5 +169,8 @@ async def create_policy_to_all(collections: list) -> str:
     if response.status_code != 200:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
+
+    opensearch = OpenSearchManager()
+    await opensearch.create_policy_to_user('all/system', opensearch_policy)
 
     return json.dumps(policy)

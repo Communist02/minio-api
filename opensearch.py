@@ -20,11 +20,11 @@ class OpenSearchManager:
         )
 
     # Не работает
-    async def create_index(self, index_name: str = 's3-storage'):
+    async def create_index(self, index_name: str = config.open_search_collections_index):
         response = await self.client.indices.create(
             index=index_name)
 
-    async def update_document(self, doc_id: int, document: dict, index_name: str = 's3-storage'):
+    async def update_document(self, doc_id: int, document: dict, index_name: str = config.open_search_collections_index):
         response = await self.client.index(
             index=index_name,
             body=document,
@@ -32,13 +32,19 @@ class OpenSearchManager:
             refresh=True,
         )
 
-    async def delete_document(self, doc_id: int, index_name: str = 's3-storage'):
+    async def delete_document(self, doc_id: int, index_name: str = config.open_search_collections_index):
         response = await self.client.delete(
             index=index_name,
             id=doc_id,
         )
 
-    async def get_document(self, doc_id: int, index_name: str = 's3-storage') -> dict | None:
+    async def create_policy_to_user(self, role_name: str, role_content: dict):
+        response = await self.client.security.create_role(
+            role=role_name,
+            body=role_content
+        )
+
+    async def get_document(self, doc_id: int, index_name: str = config.open_search_collections_index) -> dict | None:
         try:
             response = await self.client.get(
                 index=index_name,
@@ -48,7 +54,18 @@ class OpenSearchManager:
         except NotFoundError:
             return None
 
-    async def search_documents(self, text: str, fields: list = ['title', 'description', 'tags', 'collection_id', 'collection_name'], index_name: str = 's3-storage'):
+    async def search_documents(self, text: str, jwt_token: str, index_name: str = config.open_search_collections_index):
+        auth_header = {'Authorization': f'Bearer {jwt_token}'}
+        client = AsyncOpenSearch(
+            hosts=[{'host': config.open_search_host,
+                    'port': config.open_search_port}],
+            http_compress=True,
+            headers=auth_header,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode
+        )
         query = {
             'query': {
                 'query_string': {
@@ -58,7 +75,7 @@ class OpenSearchManager:
             }
         }
 
-        response = await self.client.search(
+        response = await client.search(
             body=query,
             index=index_name,
         )
