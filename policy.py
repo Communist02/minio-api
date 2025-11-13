@@ -96,9 +96,7 @@ async def create_policy_to_user(username: str, collections: list) -> str:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
 
-    opensearch_policy['index_permissions'][0]['dls'] = str(
-        opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
-    print(opensearch_policy['index_permissions'][0]['dls'])
+    opensearch_policy['index_permissions'][0]['dls'] = str(opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
     opensearch = OpenSearchManager()
     await opensearch.create_policy_to_user(username, opensearch_policy)
     return json.dumps(policy)
@@ -170,6 +168,7 @@ async def create_policy_to_all(collections: list) -> str:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
 
+    opensearch_policy['index_permissions'][0]['dls'] = str(opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
     opensearch = OpenSearchManager()
     await opensearch.create_policy_to_user('all/system', opensearch_policy)
 

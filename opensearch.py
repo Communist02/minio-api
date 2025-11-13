@@ -43,6 +43,10 @@ class OpenSearchManager:
             role=role_name,
             body=role_content
         )
+        response = await self.client.security.create_role_mapping(
+            role=role_name,
+            body={'backend_roles': [role_name]}
+        )
 
     async def get_document(self, doc_id: int, index_name: str = config.open_search_collections_index) -> dict | None:
         try:

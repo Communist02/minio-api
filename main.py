@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import httpx
-from metadata import create_metadata
+import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
 from sessions import WebSessionsBase
@@ -264,9 +264,11 @@ async def delete_files(collection_id: int, files: str, token: str):
             collection_id, session['user_id'])
         files = files.split('|')
         if access_type in access:
-            await minio.delete_files(database.get_collection_name(collection_id), files, session['jwt_token'])
+            collection_name = database.get_collection_name(collection_id)
+            await minio.delete_files(collection_name, files, session['jwt_token'])
             database.add_log(
                 'delete', 200, {'files': files}, user_id=session['user_id'], collection_id=collection_id)
+            await index.delete_index(collection_id, collection_name, files)
         else:
             database.add_log(
                 'delete', 403, {'error': f'{access_type} not in {access}', 'files': files}, user_id=session['user_id'], collection_id=collection_id)
@@ -385,11 +387,11 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            await minio.upload_file(database.get_collection_name(collection_id), file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
+            collection_name = database.get_collection_name(collection_id)
+            await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            await create_metadata(collection_id, database.get_collection_name(
-                collection_id), jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
+            await index.create_index(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
             return file.filename
         else:
             database.add_log(
@@ -983,19 +985,21 @@ async def get_file_info(token: str, collection_id: int, path: str):
 
 @app.get('/search_collections')  # safe+ logs+
 async def search_collection(text: str, token: str) -> list:
-    if token is not None:
-        session = await web_sessions.get_session(token[:32])
+    session = await web_sessions.get_session(token[:32])
+    if session:
         # Тут специально нет проверки user_id
         try:
-            collections = []
+            collections_result = []
             documents = await opensearch.search_documents(text, jwt_token=session['jwt_token'])
+            collections = database.get_collections(
+                session['user_id'], accessed_to_all=True)
             for document in documents:
-                collection = database.get_specific_access_to_all_collections(
-                    session['user_id'], [document['_id']])
+                collection = list(
+                    filter(lambda x: x['id'] == int(document['_id']), collections))
                 if len(collection) > 0:
                     collection[0]['index'] = document['_source']
-                    collections.append(collection[0])
-            return collections
+                    collections_result.append(collection[0])
+            return collections_result
         except Exception as error:
             database.add_log('search_collection_info', 500, {'error': str(
                 error), 'text': text}, user_id=session['user_id'])
@@ -1011,24 +1015,27 @@ async def search_collection(text: str, token: str) -> list:
 
 
 @app.get('/search_collection_files')  # safe+ logs+
-async def search_collection(text: str, token: str = None) -> list:
-    if token is not None:
-        user_id = await web_sessions.get_user_id(token[:32])
+async def search_collection(text: str, token: str) -> list:
+    session = await web_sessions.get_session(token[:32])
+    if session:
+        # Тут специально нет проверки user_id
+        try:
+            files = []
+            documents = await opensearch.search_documents(text, index_name=config.open_search_files_index, jwt_token=session['jwt_token'])
+            for document in documents:
+                files.append(document['_source'])
+            return files
+        except Exception as error:
+            database.add_log('search_collection_files', 500, {'error': str(
+                error), 'text': text}, user_id=session['user_id'])
+            raise HTTPException(
+                status_code=500,
+                detail=''
+            )
     else:
-        user_id = None
-    # Тут специально нет проверки user_id
-    try:
-        files = []
-        documents = await opensearch.search_documents(text, index_name=config.open_search_files_index)
-        for document in documents:
-            files.append(document['_source'])
-        return files
-    except Exception as error:
-        database.add_log('search_collection_files', 500, {'error': str(
-            error), 'text': text}, user_id=user_id)
         raise HTTPException(
-            status_code=500,
-            detail=''
+            status_code=401,
+            detail='Token invalid'
         )
 
 

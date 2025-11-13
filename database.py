@@ -235,12 +235,15 @@ class MainBase:
             username = session.execute(query).scalar()
             return username
 
-    def get_collections(self, user_id: int) -> list:
+    def get_collections(self, user_id: int, collection_ids: list[int] = None, accessed_to_all: bool = False) -> list:
         owner = self.get_owner_collections(user_id)
         accessed = self.get_access_collections(user_id)
         group = self.get_group_collections(user_id)
-        # accessed_to_all = self.get_access_to_all_collections(user_id)
-        return owner + accessed + group
+        if accessed_to_all:
+            accessed_to_all = self.get_access_to_all_collections(user_id)
+        else:
+            accessed_to_all = []
+        return owner + accessed + group + accessed_to_all
 
     def get_owner_collections(self, user_id: int) -> list:
         result = []
