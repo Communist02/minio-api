@@ -993,7 +993,7 @@ async def search_collection(text: str, token: str) -> list:
                             for x in documents['files']
                             if x['_source']['collection_id'] == file['_source']['collection_id']
                         ]
-                    collections_result.append(collection[0])
+                        collections_result.append(collection[0])
             return collections_result
         except Exception as error:
             database.add_log('search_collection_info', 500, {'error': str(

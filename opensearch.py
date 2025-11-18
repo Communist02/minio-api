@@ -134,35 +134,71 @@ class OpenSearchManager:
             'query': {
                 'bool': {
                     'should': [
+                        # 1. Точное совпадение имени
                         {
-                            'match_phrase': {  # Точное совпадение фразы
+                            'match_phrase': {
                                 'name': {
                                     'query': text,
-                                    'boost': 2.0  # Увеличение релевантности
+                                    'boost': 3.0
                                 }
                             }
                         },
+
+                        # 2. Нечеткий поиск по name
                         {
-                            'match': {  # Нечеткий поиск
-                                'description': {
-                                        'query': text,
-                                        'fuzziness': 'AUTO'
+                            'match': {
+                                'name': {
+                                    'query': text,
+                                    'fuzziness': 'AUTO',
+                                    'boost': 2.0
                                 }
                             }
                         },
+
+                        # # 3. Нечеткий поиск по other_text (всё содержимое JSON)
+                        # {
+                        #     'match': {
+                        #         'other_text': {
+                        #             'query': text,
+                        #             'fuzziness': 'AUTO'
+                        #         }
+                        #     }
+                        # },
+
+                        # 4. Точное совпадение фразы в other_text
                         {
-                            'wildcard': {  # Поиск с подстановочными знаками
-                                'name': f'*{text}*'
+                            'match_phrase': {
+                                'other_text': {
+                                    'query': text,
+                                    'boost': 1.5
+                                }
+                            }
+                        },
+
+                        # 5. Поиск по подстроке (но осторожно — wildcard дорогой)
+                        {
+                            'wildcard': {
+                                'name': f'*{text.lower()}*'
+                            }
+                        },
+
+                        # 6. Поиск по подстроке внутри other_text
+                        {
+                            'wildcard': {
+                                'other_text': f'*{text.lower()}*'
                             }
                         }
                     ]
                 }
             },
+
+            # Подсветка найденного текста
             'highlight': {
                 'fields': {
                     'name': {},
                     'path': {},
-                    'format': {}
+                    'format': {},
+                    'other_text': {}
                 }
             }
         }
