@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import httpx
+from sqlalchemy.orm.collections import collection
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -139,7 +140,12 @@ async def get_list_files(token: str, collection_id: int, path: str, recursive: b
     session = await web_sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
-            return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
+            try:
+                return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
+            except HTTPException as error:
+                database.add_log('get_list_files', error.status_code,
+                                 {'error': error.detail, 'path': path, 'recursive': recursive}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -159,13 +165,18 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
     session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            path = path.strip('/')
-            range_header = request.headers.get('Range')
-            return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                path = path.strip('/')
+                range_header = request.headers.get('Range')
+                return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
+            except Exception as error:
+                database.add_log('get_file', 500,
+                                 {'error': error, 'path': path, 'preview': preview}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -185,11 +196,16 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
     session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
+            except Exception as error:
+                database.add_log('get_files', 500, {
+                                 'error': error, 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -874,6 +890,9 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
     if user_id:
         if database.get_type_access(collection_id, user_id) in access:
             try:
+                data['collection_id'] = collection_id
+                data['collection_name'] = database.get_collection_name(
+                    collection_id)
                 await opensearch.update_document(collection_id, data)
                 database.add_log('change_collection_info', 200, None,
                                  user_id=user_id, collection_id=collection_id)
@@ -966,7 +985,8 @@ async def search_collection(text: str, token: str) -> list:
                 collection = list(filter(
                     lambda x: x['id'] == file['_source']['collection_id'], collections_result))
                 if len(collection) == 0:
-                    collection = list( filter(lambda x: x['id'] == file['_source']['collection_id'], collections))
+                    collection = list(
+                        filter(lambda x: x['id'] == file['_source']['collection_id'], collections))
                     if len(collection) > 0:
                         collection[0]['files'] = [
                             x['_source']
