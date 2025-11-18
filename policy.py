@@ -84,19 +84,21 @@ async def create_policy_to_user(username: str, collections: list) -> str:
         region='us-east-1',
         service='s3'
     )
-    response = await httpx.AsyncClient(verify=not config.debug_mode).put(
-        f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
-        params={'name': username},
-        headers={'Content-Type': 'application/json'},
-        auth=auth,
-        json=policy,
-        timeout=5
-    )
+    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+        response = await client.put(
+            f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
+            params={'name': username},
+            headers={'Content-Type': 'application/json'},
+            auth=auth,
+            json=policy,
+            timeout=5
+        )
     if response.status_code != 200:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
 
-    opensearch_policy['index_permissions'][0]['dls'] = str(opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
+    opensearch_policy['index_permissions'][0]['dls'] = str(
+        opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
     opensearch = OpenSearchManager()
     await opensearch.create_policy_to_user(username, opensearch_policy)
     return json.dumps(policy)
@@ -156,19 +158,22 @@ async def create_policy_to_all(collections: list) -> str:
         region='us-east-1',
         service='s3'
     )
-    response = await httpx.AsyncClient(verify=not config.debug_mode).put(
-        f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
-        params={'name': 'all/system'},
-        headers={'Content-Type': 'application/json'},
-        auth=auth,
-        json=policy,
-        timeout=5
-    )
+
+    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+        response = await client.put(
+            f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
+            params={'name': 'all/system'},
+            headers={'Content-Type': 'application/json'},
+            auth=auth,
+            json=policy,
+            timeout=5
+        )
     if response.status_code != 200:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)
 
-    opensearch_policy['index_permissions'][0]['dls'] = str(opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
+    opensearch_policy['index_permissions'][0]['dls'] = str(
+        opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
     opensearch = OpenSearchManager()
     await opensearch.create_policy_to_user('all/system', opensearch_policy)
 

@@ -417,10 +417,11 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
             '/')[0], credentials.username.split('/')[-1]
     if org == 'default' or org == '':
         credentials.username = username
-    response = await httpx.AsyncClient(verify=not config.debug_mode).post(
-        f'{config.auth_api_url}/login?org={org}',
-        auth=(username, credentials.password)
-    )
+    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+        response = await client.post(
+            f'{config.auth_api_url}/login?org={org}',
+            auth=(username, credentials.password)
+        )
     if response.status_code == 200:
         jwt_token = response.json()
         user_id = database.get_user_id(credentials.username)
@@ -516,10 +517,7 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
         except Exception as error:
             database.add_log('give_access_user_to_collection',
                              500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -540,10 +538,7 @@ async def create_group(request: CreateGroupRequest):
         except Exception as error:
             database.add_log('create_group', 500, {'error': str(
                 error), 'title': request.title, 'description': request.description}, user_id=user_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -569,10 +564,7 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
         except Exception as error:
             database.add_log('give_access_group_to_collection',
                              500, {'error': str(error)}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -597,10 +589,7 @@ async def add_user_to_group(request: AddUserToGroupRequest):
         except Exception as error:
             database.add_log('add_user_to_group', 500, {'error': str(
                 error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -682,10 +671,7 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
         except Exception as error:
             database.add_log('delete_access_to_collection', 500, {
                              'error': str(error), 'access_id': access_id}, user_id=user_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -706,10 +692,7 @@ async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list 
         except Exception as error:
             database.add_log('delete_user_to_group', 500, {'error': str(
                 error), 'user_id': user_id}, user_id=req_user_id, group_id=group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -752,10 +735,7 @@ async def transfer_power_to_group(token: str, group_id: int, user_id: int):
         except Exception as error:
             database.add_log('transfer_power_to_group', 500, {'error': str(
                 error), 'user_id': user_id}, user_id=owner_user_id, group_id=group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -776,10 +756,7 @@ async def exit_group(token: str, group_id: int):
         except Exception as error:
             database.add_log('exit_group', 500, {'error': str(error)},
                              user_id=user_id, group_id=group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -799,10 +776,7 @@ async def change_role_in_group(token: str, group_id: int, user_id: int, role_id:
         except Exception as error:
             database.add_log('change_role_in_group', 500, {'error': str(error), 'user_id': user_id, 'role_id': role_id},
                              user_id=owner_user_id, group_id=group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -841,10 +815,7 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
         except Exception as error:
             database.add_log('change_access_type', 500, {'error': str(
                 error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=user_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -864,10 +835,7 @@ async def change_group_info(request: ChangeGroupInfoRequest):
         except Exception as error:
             database.add_log('change_group_info', 500, {'error': str(
                 error), 'title': request.title, 'description': request.description}, user_id=user_id, group_id=request.group_id)
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -912,10 +880,7 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
             except Exception as error:
                 database.add_log('change_collection_info', 500, {'error': str(
                     error), 'data': data}, user_id=user_id, collection_id=collection_id)
-                raise HTTPException(
-                    status_code=500,
-                    detail=''
-                )
+                error
         else:
             raise HTTPException(
                 status_code=403,
@@ -939,10 +904,7 @@ async def get_collection_info(token: str, collection_id: int):
             except Exception as error:
                 database.add_log('get_collection_info', 500, {'error': str(
                     error)}, user_id=user_id, collection_id=collection_id)
-                raise HTTPException(
-                    status_code=500,
-                    detail=''
-                )
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -967,10 +929,7 @@ async def get_file_info(token: str, collection_id: int, path: str):
             except Exception as error:
                 database.add_log('get_file_info', 500, {'error': str(
                     error), 'path': path}, user_id=user_id, collection_id=collection_id)
-                raise HTTPException(
-                    status_code=500,
-                    detail=''
-                )
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -987,26 +946,39 @@ async def get_file_info(token: str, collection_id: int, path: str):
 async def search_collection(text: str, token: str) -> list:
     session = await web_sessions.get_session(token[:32])
     if session:
-        # Тут специально нет проверки user_id
         try:
             collections_result = []
-            documents = await opensearch.search_documents(text, jwt_token=session['jwt_token'])
+            documents = await opensearch.search_collections(text, jwt_token=session['jwt_token'])
             collections = database.get_collections(
                 session['user_id'], accessed_to_all=True)
-            for document in documents:
+            for document in documents['collections']:
                 collection = list(
                     filter(lambda x: x['id'] == int(document['_id']), collections))
                 if len(collection) > 0:
                     collection[0]['index'] = document['_source']
+                    collection[0]['files'] = [
+                        x['_source']
+                        for x in documents['files']
+                        if x['_source']['collection_id'] == int(document['_id'])
+                    ]
+                    collections_result.append(collection[0])
+            for file in documents['files']:
+                collection = list(filter(
+                    lambda x: x['id'] == file['_source']['collection_id'], collections_result))
+                if len(collection) == 0:
+                    collection = list( filter(lambda x: x['id'] == file['_source']['collection_id'], collections))
+                    if len(collection) > 0:
+                        collection[0]['files'] = [
+                            x['_source']
+                            for x in documents['files']
+                            if x['_source']['collection_id'] == file['_source']['collection_id']
+                        ]
                     collections_result.append(collection[0])
             return collections_result
         except Exception as error:
             database.add_log('search_collection_info', 500, {'error': str(
                 error), 'text': text}, user_id=session['user_id'])
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
+            raise error
     else:
         raise HTTPException(
             status_code=401,
@@ -1014,29 +986,29 @@ async def search_collection(text: str, token: str) -> list:
         )
 
 
-@app.get('/search_collection_files')  # safe+ logs+
-async def search_collection(text: str, token: str) -> list:
-    session = await web_sessions.get_session(token[:32])
-    if session:
-        # Тут специально нет проверки user_id
-        try:
-            files = []
-            documents = await opensearch.search_documents(text, index_name=config.open_search_files_index, jwt_token=session['jwt_token'])
-            for document in documents:
-                files.append(document['_source'])
-            return files
-        except Exception as error:
-            database.add_log('search_collection_files', 500, {'error': str(
-                error), 'text': text}, user_id=session['user_id'])
-            raise HTTPException(
-                status_code=500,
-                detail=''
-            )
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+# @app.get('/search_collection_files')  # safe+ logs+
+# async def search_collection(text: str, token: str) -> list:
+#     session = await web_sessions.get_session(token[:32])
+#     if session:
+#         # Тут специально нет проверки user_id
+#         try:
+#             files = []
+#             documents = await opensearch.search_documents(text, index_name=config.open_search_files_index, jwt_token=session['jwt_token'])
+#             for document in documents:
+#                 files.append(document['_source'])
+#             return files
+#         except Exception as error:
+#             database.add_log('search_collection_files', 500, {'error': str(
+#                 error), 'text': text}, user_id=session['user_id'])
+#             raise HTTPException(
+#                 status_code=500,
+#                 detail=''
+#             )
+#     else:
+#         raise HTTPException(
+#             status_code=401,
+#             detail='Token invalid'
+#         )
 
 
 @app.post('/change_access_to_all')  # safe+ logs+
@@ -1057,10 +1029,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
             except Exception as error:
                 database.add_log('change_access_to_all', 500, {'error': str(
                     error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
-                raise HTTPException(
-                    status_code=500,
-                    detail=''
-                )
+                error
     else:
         raise HTTPException(
             status_code=401,

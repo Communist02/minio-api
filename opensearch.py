@@ -9,56 +9,98 @@ auth = ('admin', 'OTFiZDkwMGRiOWQw1!')
 
 class OpenSearchManager:
     def __init__(self, host: str = config.open_search_host, port: int = config.open_search_port, auth: tuple = auth):
-        self.client = AsyncOpenSearch(
-            hosts=[{'host': host, 'port': port}],
+        self.host = host
+        self.port = port
+        self.auth = auth
+
+    # Не работает
+    async def create_index(self, index_name: str = config.open_search_collections_index):
+        async with AsyncOpenSearch(
+            hosts=[{'host': self.host, 'port': self.port}],
             http_compress=True,
             http_auth=auth,
             use_ssl=True,
             verify_certs=not config.debug_mode,
             ssl_assert_hostname=not config.debug_mode,
             ssl_show_warn=not config.debug_mode,
-        )
-
-    # Не работает
-    async def create_index(self, index_name: str = config.open_search_collections_index):
-        response = await self.client.indices.create(
-            index=index_name)
+        ) as client:
+            response = await client.indices.create(
+                index=index_name)
 
     async def update_document(self, doc_id: int, document: dict, index_name: str = config.open_search_collections_index):
-        response = await self.client.index(
-            index=index_name,
-            body=document,
-            id=doc_id,
-            refresh=True,
-        )
+        async with AsyncOpenSearch(
+            hosts=[{'host': self.host, 'port': self.port}],
+            http_compress=True,
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode,
+        ) as client:
+            response = await client.index(
+                index=index_name,
+                body=document,
+                id=doc_id,
+                refresh=True,
+            )
 
     async def delete_document(self, doc_id: int, index_name: str = config.open_search_collections_index):
-        response = await self.client.delete(
-            index=index_name,
-            id=doc_id,
-        )
-
-    async def create_policy_to_user(self, role_name: str, role_content: dict):
-        response = await self.client.security.create_role(
-            role=role_name,
-            body=role_content
-        )
-        response = await self.client.security.create_role_mapping(
-            role=role_name,
-            body={'backend_roles': [role_name]}
-        )
-
-    async def get_document(self, doc_id: int, index_name: str = config.open_search_collections_index) -> dict | None:
-        try:
-            response = await self.client.get(
+        async with AsyncOpenSearch(
+            hosts=[{'host': self.host, 'port': self.port}],
+            http_compress=True,
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode,
+        ) as client:
+            response = await client.delete(
                 index=index_name,
                 id=doc_id,
             )
-            return response['_source']
-        except NotFoundError:
-            return None
 
-    async def search_documents(self, text: str, jwt_token: str, index_name: str = config.open_search_collections_index):
+    async def create_policy_to_user(self, role_name: str, role_content: dict):
+        async with AsyncOpenSearch(
+            hosts=[{'host': self.host, 'port': self.port}],
+            http_compress=True,
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode,
+        ) as client:
+            response = await client.security.create_role(
+                role=role_name,
+                body=role_content
+            )
+            response = await client.security.create_role_mapping(
+                role=role_name,
+                body={'backend_roles': [role_name]}
+            )
+
+    async def get_document(self, doc_id: int, index_name: str = config.open_search_collections_index) -> dict | None:
+        async with AsyncOpenSearch(
+            hosts=[{'host': self.host, 'port': self.port}],
+            http_compress=True,
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode,
+        ) as client:
+            try:
+                response = await client.get(
+                    index=index_name,
+                    id=doc_id,
+                )
+                return response['_source']
+            except NotFoundError:
+                return None
+
+    async def search_collections(self, text: str, jwt_token: str, index_collections: str = config.open_search_collections_index, index_files: str = config.open_search_files_index):
+        size_collections = 100
+        size_files = 1000
+
         auth_header = {'Authorization': f'Bearer {jwt_token}'}
         client = AsyncOpenSearch(
             hosts=[{'host': config.open_search_host,
@@ -70,17 +112,78 @@ class OpenSearchManager:
             ssl_assert_hostname=not config.debug_mode,
             ssl_show_warn=not config.debug_mode
         )
-        query = {
+        query_collections = {
+            'size': size_collections,
             'query': {
-                'query_string': {
-                    'query': f'*{text}*',
-                    'default_operator': 'OR'
+                'multi_match': {
+                    'query': text,
+                    'fields': ['*'],  # Искать по всем полям
+                    'type': 'best_fields',  # Лучшее совпадение по одному полю
+                    'fuzziness': 'AUTO',  # Автоматическая нечеткость для опечаток
+                    'operator': 'or'
+                }
+            },
+            'highlight': {  # Подсветка результатов
+                'fields': {
+                    '*': {}  # Подсветка во всех полях
                 }
             }
         }
-
-        response = await client.search(
-            body=query,
-            index=index_name,
-        )
-        return response['hits']['hits']
+        query_files = {
+            'size': size_files,
+            'query': {
+                'bool': {
+                    'should': [
+                        {
+                            'match_phrase': {  # Точное совпадение фразы
+                                'name': {
+                                    'query': text,
+                                    'boost': 2.0  # Увеличение релевантности
+                                }
+                            }
+                        },
+                        {
+                            'match': {  # Нечеткий поиск
+                                'description': {
+                                        'query': text,
+                                        'fuzziness': 'AUTO'
+                                }
+                            }
+                        },
+                        {
+                            'wildcard': {  # Поиск с подстановочными знаками
+                                'name': f'*{text}*'
+                            }
+                        }
+                    ]
+                }
+            },
+            'highlight': {
+                'fields': {
+                    'name': {},
+                    'path': {},
+                    'format': {}
+                }
+            }
+        }
+        async with AsyncOpenSearch(
+            hosts=[{'host': config.open_search_host,
+                    'port': config.open_search_port}],
+            http_compress=True,
+            headers=auth_header,
+            use_ssl=True,
+            verify_certs=not config.debug_mode,
+            ssl_assert_hostname=not config.debug_mode,
+            ssl_show_warn=not config.debug_mode
+        ) as client:
+            response = await client.search(
+                body=query_collections,
+                index=index_collections,
+            )
+            collections = response['hits']['hits']
+            response = await client.search(
+                body=query_files,
+                index=index_files,
+            )
+            files = response['hits']['hits']
+        return {'collections': collections, 'files': files}

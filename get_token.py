@@ -4,11 +4,13 @@ import config
 
 
 async def get_sts_token(token: str, endpoint: str, duration=2592000):
-    response = await httpx.AsyncClient(verify=not config.debug_mode).post(
-        f'{endpoint}/{f"?DurationSeconds={duration}" if duration != 0 else ""}',
-        params={'Action': 'AssumeRoleWithWebIdentity', 'WebIdentityToken': token, 'Version': '2011-06-15'},
-        timeout=5
-    )
+    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+        response = await client.post(
+            f'{endpoint}/{f"?DurationSeconds={duration}" if duration != 0 else ""}',
+            params={'Action': 'AssumeRoleWithWebIdentity',
+                    'WebIdentityToken': token, 'Version': '2011-06-15'},
+            timeout=5
+        )
 
     if response.status_code == 200:
         xml_response = response.text
