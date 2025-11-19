@@ -102,16 +102,6 @@ class OpenSearchManager:
         size_files = 1000
 
         auth_header = {'Authorization': f'Bearer {jwt_token}'}
-        client = AsyncOpenSearch(
-            hosts=[{'host': config.open_search_host,
-                    'port': config.open_search_port}],
-            http_compress=True,
-            headers=auth_header,
-            use_ssl=True,
-            verify_certs=not config.debug_mode,
-            ssl_assert_hostname=not config.debug_mode,
-            ssl_show_warn=not config.debug_mode
-        )
         query_collections = {
             'size': size_collections,
             'query': {
@@ -120,7 +110,8 @@ class OpenSearchManager:
                     'fields': ['*'],  # Искать по всем полям
                     'type': 'best_fields',  # Лучшее совпадение по одному полю
                     'fuzziness': 'AUTO',  # Автоматическая нечеткость для опечаток
-                    'operator': 'or'
+                    'operator': 'or',
+                    'analyzer': 'russian'
                 }
             },
             'highlight': {  # Подсветка результатов
@@ -155,15 +146,16 @@ class OpenSearchManager:
                             }
                         },
 
-                        # # 3. Нечеткий поиск по other_text (всё содержимое JSON)
-                        # {
-                        #     'match': {
-                        #         'other_text': {
-                        #             'query': text,
-                        #             'fuzziness': 'AUTO'
-                        #         }
-                        #     }
-                        # },
+                        # 3. Нечеткий поиск по other_text (всё содержимое JSON)
+                        {
+                            'match': {
+                                'other_text': {
+                                    'query': text,
+                                    'fuzziness': 'AUTO',
+                                    'analyzer': 'english'
+                                }
+                            }
+                        },
 
                         # 4. Точное совпадение фразы в other_text
                         {
