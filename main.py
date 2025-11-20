@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import httpx
-from sqlalchemy.orm.collections import collection
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -313,9 +312,11 @@ async def copy_files(request: CopyRequest):
                 request.source_collection_id, session['user_id'], key)
             destination_collection_key = database.get_collection_key(
                 request.destination_collection_id, session['user_id'], key)
-            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, database.get_collection_name(request.destination_collection_id), request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
+            collection_name = database.get_collection_name(request.destination_collection_id)
+            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, collection_name, request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
             database.add_log('copy', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
                              'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
+            await index.create_index(request.destination_collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(request.destination_collection_id, session['user_id'], key), path=request.destination_path)
         else:
             database.add_log('copy', 403, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
                              'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
@@ -343,9 +344,11 @@ async def rename_file(collection_id: int, request: RenameRequest):
             key = hash_reconstruct(session['hash1'], hash2)
             collection_key = database.get_collection_key(
                 collection_id, session['user_id'], key)
-            await minio.rename_file(database.get_collection_name(collection_id), request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
+            collection_name = database.get_collection_name(collection_id)
+            await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
             database.add_log(
                 'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+            await index.delete_index(collection_id, collection_name, request.path)
         else:
             database.add_log(
                 'rename', 403, {'error': f'{access_type} not in {access}', 'collection_id': collection_id, 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
@@ -407,7 +410,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            await index.create_index(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key))
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key), files=[path.strip('/') + '/' + file.filename])
             return file.filename
         else:
             database.add_log(

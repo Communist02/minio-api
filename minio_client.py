@@ -12,6 +12,7 @@ import config
 from get_token import get_sts_token
 import zipstream
 
+
 class MinIOClient:
     def __init__(self, endpoint: str):
         self.endpoint = endpoint
@@ -386,7 +387,10 @@ class MinIOClient:
         new_object_name = object_name[:-
                                       len(object_name.split('/')[-1])] + new_name
         if object_name == new_object_name:
-            return
+            raise HTTPException(
+                status_code=409,
+                detail=f"Old and new path equivalent'{bucket_name}': {error.message}"
+            )
 
         if path.endswith('/'):  # папка
             try:
