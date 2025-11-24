@@ -410,7 +410,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
             await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
                 'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(collection_id, session['user_id'], key), files=[path.strip('/') + '/' + file.filename])
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + '/' + file.filename])
             return file.filename
         else:
             database.add_log(
@@ -1053,6 +1053,36 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
                 database.add_log('change_access_to_all', 500, {'error': str(
                     error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
                 error
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
+
+@app.post('/collections/{collection_id}/file_index/{token}/{path:path}')
+async def index_file(token: str, collection_id: int, path: str):
+    access = [1, 2, 3, 4]
+    token, hash2 = token[:32], token[32:]
+    session = await web_sessions.get_session(token)
+    if session:
+        access_type = database.get_type_access(
+            collection_id, session['user_id'])
+        if access_type in access:
+            hash2 = base64.urlsafe_b64decode(hash2.encode())
+            key = hash_reconstruct(session['hash1'], hash2)
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            collection_name = database.get_collection_name(collection_id)
+            database.add_log(
+                'index_file', 200, {'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=['/' + path.strip('/')])
+        else:
+            database.add_log(
+                'index_file', 403, {'error': f'{access_type} not in {access}', 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            raise HTTPException(
+                status_code=403,
+                detail='No access'
+            )
     else:
         raise HTTPException(
             status_code=401,
