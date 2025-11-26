@@ -1,11 +1,8 @@
 from datetime import datetime
-import cryptography
 from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
-
-from sqlalchemy.sql.functions import user
 import crypt
 import json
 

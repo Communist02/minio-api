@@ -174,7 +174,7 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
                 return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
             except Exception as error:
                 database.add_log('get_file', 500,
-                                 {'error': error, 'path': path, 'preview': preview}, user_id=session['user_id'], collection_id=collection_id)
+                                 {'error': str(error), 'path': path, 'preview': preview}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             raise HTTPException(
@@ -203,7 +203,7 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
                 return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
             except Exception as error:
                 database.add_log('get_files', 500, {
-                                 'error': error, 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                                 'error': str(error), 'files': files}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             raise HTTPException(
@@ -279,14 +279,19 @@ async def delete_files(collection_id: int, files: str, token: str):
             collection_id, session['user_id'])
         files = files.split('|')
         if access_type in access:
-            collection_name = database.get_collection_name(collection_id)
-            await minio.delete_files(collection_name, files, session['jwt_token'])
-            database.add_log(
-                'delete', 200, {'files': files}, user_id=session['user_id'], collection_id=collection_id)
-            await index.delete_index(collection_id, collection_name, files)
+            try:
+                collection_name = database.get_collection_name(collection_id)
+                await minio.delete_files(collection_name, files, session['jwt_token'])
+                database.add_log(
+                    'delete_files', 200, {'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                await index.delete_index(collection_id, collection_name, files)
+            except Exception as error:
+                database.add_log('delete_files', 500, {
+                                 'error': str(error), 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             database.add_log(
-                'delete', 403, {'error': f'{access_type} not in {access}', 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                'delete_files', 403, {'error': f'{access_type} not in {access}', 'files': files}, user_id=session['user_id'], collection_id=collection_id)
             raise HTTPException(
                 status_code=403,
                 detail='No access'
@@ -306,19 +311,26 @@ async def copy_files(request: CopyRequest):
     session = await web_sessions.get_session(token)
     if session:
         if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            source_collection_key = database.get_collection_key(
-                request.source_collection_id, session['user_id'], key)
-            destination_collection_key = database.get_collection_key(
-                request.destination_collection_id, session['user_id'], key)
-            collection_name = database.get_collection_name(request.destination_collection_id)
-            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, collection_name, request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
-            database.add_log('copy', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
-                             'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
-            await index.create_index(request.destination_collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(request.destination_collection_id, session['user_id'], key), path=request.destination_path)
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                source_collection_key = database.get_collection_key(
+                    request.source_collection_id, session['user_id'], key)
+                destination_collection_key = database.get_collection_key(
+                    request.destination_collection_id, session['user_id'], key)
+                collection_name = database.get_collection_name(
+                    request.destination_collection_id)
+                await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, collection_name, request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
+                database.add_log('copy_files', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+                                                     'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
+                await index.create_index(request.destination_collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(request.destination_collection_id, session['user_id'], key), path=request.destination_path)
+            except Exception as error:
+                database.add_log('copy_files', 500, {
+                                 'error': str(error), 'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+                                 'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
+                raise error
         else:
-            database.add_log('copy', 403, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+            database.add_log('copy_files', 403, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
                              'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
             raise HTTPException(
                 status_code=403,
@@ -340,18 +352,24 @@ async def rename_file(collection_id: int, request: RenameRequest):
         access_type = database.get_type_access(
             collection_id, session['user_id'])
         if access_type in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            collection_name = database.get_collection_name(collection_id)
-            await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
-            database.add_log(
-                'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
-            await index.delete_index(collection_id, collection_name, request.path)
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                collection_name = database.get_collection_name(collection_id)
+                await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
+                new_paths = database.add_log(
+                    'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=new_paths)
+                await index.delete_index(collection_id, collection_name, request.path)
+            except Exception as error:
+                database.add_log('rename', 500, {
+                                 'error': str(error), 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             database.add_log(
-                'rename', 403, {'error': f'{access_type} not in {access}', 'collection_id': collection_id, 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+                'rename', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
             raise HTTPException(
                 status_code=403,
                 detail='No access'
@@ -372,13 +390,18 @@ async def create_folder(collection_id: int, request: NewFolderRequest):
         access_type = database.get_type_access(
             collection_id, session['user_id'])
         if access_type in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['jwt_token'])
-            database.add_log(
-                'create_folder', 200, {'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['jwt_token'])
+                database.add_log(
+                    'create_folder', 200, {'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+            except Exception as error:
+                database.add_log('create_folder', 500, {
+                                 'error': str(error), 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             database.add_log(
                 'create_folder', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
@@ -402,16 +425,21 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
         access_type = database.get_type_access(
             collection_id, session['user_id'])
         if access_type in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            collection_name = database.get_collection_name(collection_id)
-            await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
-            database.add_log(
-                'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + '/' + file.filename])
-            return file.filename
+            try:
+                hash2 = base64.urlsafe_b64decode(hash2.encode())
+                key = hash_reconstruct(session['hash1'], hash2)
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                collection_name = database.get_collection_name(collection_id)
+                await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
+                database.add_log(
+                    'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + '/' + file.filename])
+                return file.filename
+            except Exception as error:
+                database.add_log('upload_file', 500, {
+                                 'error': str(error), 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             database.add_log(
                 'upload', 403, {'error': f'{access_type} not in {access}', 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
@@ -1058,6 +1086,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
             status_code=401,
             detail='Token invalid'
         )
+
 
 @app.post('/collections/{collection_id}/file_index/{token}/{path:path}')
 async def index_file(token: str, collection_id: int, path: str):

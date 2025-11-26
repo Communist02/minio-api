@@ -378,7 +378,7 @@ class MinIOClient:
                             detail=f"Failed copy file '{object_name}': {error.message}"
                         )
 
-    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, jwt_token: str):
+    async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, jwt_token: str) -> list:
         auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
         client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
                        auth['session_token'], secure=True, cert_check=self.cert_check)
@@ -386,6 +386,7 @@ class MinIOClient:
         object_name = path.strip('/')
         new_object_name = object_name[:-
                                       len(object_name.split('/')[-1])] + new_name
+        new_paths = []
         if object_name == new_object_name:
             raise HTTPException(
                 status_code=409,
@@ -403,6 +404,7 @@ class MinIOClient:
                     object_name = obj.object_name
                     relative_path = object_name[len(prefix):].lstrip('/')
                     destination_object_name = f'{new_object_name}/{relative_path}'
+                    new_paths.append(destination_object_name)
                     await asyncio.to_thread(
                         client.copy_object,
                         bucket_name=bucket_name,
@@ -448,6 +450,7 @@ class MinIOClient:
                     )
 
         await self.delete_files(bucket_name, [path], jwt_token)
+        return new_paths
 
     async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, jwt_token: str, overwrite=True):
         auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
