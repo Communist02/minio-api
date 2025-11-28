@@ -930,7 +930,7 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
             except Exception as error:
                 database.add_log('change_collection_info', 500, {'error': str(
                     error), 'data': data}, user_id=user_id, collection_id=collection_id)
-                error
+                raise error
         else:
             raise HTTPException(
                 status_code=403,
@@ -1080,7 +1080,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
             except Exception as error:
                 database.add_log('change_access_to_all', 500, {'error': str(
                     error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
-                error
+                raise error
     else:
         raise HTTPException(
             status_code=401,
