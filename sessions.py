@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Tuple
 from sqlalchemy import BINARY, update, delete, String
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import select, insert
 from crypt import hash_argon2_from_password
 
@@ -25,7 +25,13 @@ class WebSession(Base):
 class WebSessionsBase:
     def __init__(self):
         self.engine = create_async_engine(
-            'mariadb+asyncmy://root:root@localhost/web_sessions?charset=utf8mb4')
+            'mariadb+asyncmy://root:root@localhost/web_sessions?charset=utf8mb4',
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=10,
+            max_overflow=20,
+            echo=False,
+        )
 
     async def initialize(self):
         async with self.engine.begin() as conn:
@@ -40,7 +46,8 @@ class WebSessionsBase:
 
     async def remove_deprecation(self):
         async with AsyncSession(self.engine) as session:
-            query = delete(WebSession).where((WebSession.last_used < datetime.now() - timedelta(days=3)) | (WebSession.created < datetime.now() - timedelta(days=30)))
+            query = delete(WebSession).where((WebSession.last_used < datetime.now(
+            ) - timedelta(days=3)) | (WebSession.created < datetime.now() - timedelta(days=30)))
             await session.execute(query)
             await session.commit()
 
@@ -48,7 +55,8 @@ class WebSessionsBase:
         token = hash_argon2_from_password(token)
         await self.remove_deprecation()
         async with AsyncSession(self.engine) as session:
-            query = select(WebSession.user_id, WebSession.hash1, WebSession.jwt_token).where(WebSession.token == token)
+            query = select(WebSession.user_id, WebSession.hash1,
+                           WebSession.jwt_token).where(WebSession.token == token)
             result = (await session.execute(query)).first()
             if result is None:
                 return None

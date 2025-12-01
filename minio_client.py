@@ -457,7 +457,7 @@ class MinIOClient:
         client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
                        auth['session_token'], secure=True, cert_check=self.cert_check)
 
-        object_name = path.strip('/') + '/' + file.filename
+        object_name = path.strip('/') + '/' + file.filename.strip('/')
         if not overwrite:
             try:
                 await asyncio.to_thread(
