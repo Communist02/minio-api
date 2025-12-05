@@ -88,6 +88,25 @@ class MinIOClient:
                         'message': error.message
                     }
                 )
+            
+    async def get_dir_info(self, bucket_name: str, path: str, jwt_token: str) -> list[dict]:
+        files = await self.get_list_files(bucket_name, path, True, jwt_token)
+        count_files = 0
+        count_dir = 0
+        sum_size = 0
+        for file in files:
+            if file['isDirectory']:
+                count_dir += 1
+            else:
+                count_files += 1
+                sum_size += file['size']
+        return {
+            'count_files': count_files,
+            'count_dir': count_dir,
+            'sum_size': sum_size,
+            'path': '/' + path.strip('/')
+        }
+
 
     async def get_buckets(self, jwt_token: str) -> list[str]:
         auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)

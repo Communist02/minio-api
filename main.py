@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import httpx
+from requests import session
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -969,16 +970,19 @@ async def get_collection_info(token: str, collection_id: int):
 
 # safe+ logs+
 @app.get('/collections/{collection_id}/file_info/{token}/{path:path}')
-async def get_file_info(token: str, collection_id: int, path: str):
+async def get_file_info(token: str, collection_id: int, path: str, is_dir: bool):
     access = [1, 2, 3, 4]
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        if database.get_type_access(collection_id, user_id) in access:
+    session = await web_sessions.get_session(token[:32])
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             try:
-                return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.open_search_files_index)
+                if is_dir:
+                    return await minio.get_dir_info(database.get_collection_name(collection_id), path, session['jwt_token'])
+                else:
+                    return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.open_search_files_index)
             except Exception as error:
                 database.add_log('get_file_info', 500, {'error': str(
-                    error), 'path': path}, user_id=user_id, collection_id=collection_id)
+                    error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             raise HTTPException(
