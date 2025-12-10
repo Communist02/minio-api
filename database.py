@@ -113,7 +113,13 @@ def insert_initial_data(target, connection, **kw):
 class MainBase:
     def __init__(self):
         self.engine = create_engine(
-            'mariadb+pymysql://root:root@localhost/main?charset=utf8mb4')
+            'mariadb+pymysql://root:root@localhost/main?charset=utf8mb4',
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=10,
+            max_overflow=20,
+            echo=False,
+        )
         self.connection = self.engine.connect()
         Base.metadata.create_all(self.engine)
 
@@ -306,7 +312,7 @@ class MainBase:
                 result.append(
                     {'id': collection[0], 'name': collection[1], 'type': 'access_to_all', 'access_type_id': 3})
             return result
-        
+
     def get_specific_access_to_all_collections(self, user_id: int, collection_ids: list[int]) -> list:
         result = []
         with Session(self.engine) as session:
