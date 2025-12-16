@@ -92,6 +92,8 @@ minio = MinIOClient(config.minio_url)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await create_policy_to_all(database.get_absolute_access_to_all_collections())
+
     # Инициализация при запуске
     await web_sessions.initialize()
     yield
