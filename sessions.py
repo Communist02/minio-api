@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import select, insert
 from crypt import hash_argon2_from_password
+import config
 
 
 class Base(DeclarativeBase):
@@ -25,7 +26,7 @@ class WebSession(Base):
 class WebSessionsBase:
     def __init__(self):
         self.engine = create_async_engine(
-            'mariadb+asyncmy://root:root@localhost/web_sessions?charset=utf8mb4',
+            f'mariadb+asyncmy://{config.db_user}:{config.db_password}@localhost/web_sessions?charset=utf8mb4',
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=10,

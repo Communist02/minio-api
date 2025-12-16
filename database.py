@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, select, insert
 import secrets
 import crypt
 import json
+import config
 
 
 class Base(DeclarativeBase):
@@ -113,7 +114,7 @@ def insert_initial_data(target, connection, **kw):
 class MainBase:
     def __init__(self):
         self.engine = create_engine(
-            'mariadb+pymysql://root:root@localhost/main?charset=utf8mb4',
+            f'mariadb+pymysql://{config.db_user}:{config.db_password}@localhost/main?charset=utf8mb4',
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=10,

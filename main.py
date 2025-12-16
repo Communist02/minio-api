@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import httpx
-from requests import session
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -979,7 +978,7 @@ async def get_file_info(token: str, collection_id: int, path: str, is_dir: bool)
                 if is_dir:
                     return await minio.get_dir_info(database.get_collection_name(collection_id), path, session['jwt_token'])
                 else:
-                    return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.open_search_files_index)
+                    return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.opensearch_files_index)
             except Exception as error:
                 database.add_log('get_file_info', 500, {'error': str(
                     error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)

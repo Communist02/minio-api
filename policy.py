@@ -21,8 +21,8 @@ async def create_policy_to_user(username: str, collections: list) -> str:
         "cluster_permissions": [],
         "index_permissions": [{
             "index_patterns": [
-                config.open_search_collections_index,
-                config.open_search_files_index
+                config.opensearch_collections_index,
+                config.opensearch_files_index
             ],
             "allowed_actions": [
                 "read",
@@ -120,8 +120,8 @@ async def create_policy_to_all(collections: list) -> str:
         "cluster_permissions": [],
         "index_permissions": [{
             "index_patterns": [
-                config.open_search_collections_index,
-                config.open_search_files_index
+                config.opensearch_collections_index,
+                config.opensearch_files_index
             ],
             "allowed_actions": [
                 "read",
