@@ -655,7 +655,7 @@ async def get_groups(token: str) -> list | None:
 
 @app.delete('/remove_collection')  # safe+ logs+
 async def remove_collection(token: str, collection_id: int):
-    session = web_sessions.get_session(token[:32])
+    session = await web_sessions.get_session(token[:32])
     if session:
         collection_name = database.get_collection_name(collection_id)
         try:
