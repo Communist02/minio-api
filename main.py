@@ -501,7 +501,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     return {
         'token': token + hash2,
         'user_id': user_id,
-        'username': credentials.username,
+        'username': username
     }
 
 
@@ -515,7 +515,7 @@ async def check(token: str) -> dict[str, int | bool]:
     raise HTTPException(status_code=401, detail='Token not found')
 
 
-@app.get('/delete_session')  # safe+
+@app.delete('/delete_session')  # safe+
 async def check(token: str) -> bool:
     user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
