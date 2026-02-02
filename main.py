@@ -1093,8 +1093,8 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
         )
 
 
-@app.post('/collections/{collection_id}/file_index/{token}/{path:path}')
-async def index_file(token: str, collection_id: int, path: str):
+@app.post('/collections/{collection_id}/indexing_file/{token}/{path:path}')
+async def indexing_file(token: str, collection_id: int, path: str):
     access = [1, 2, 3, 4]
     token, hash2 = token[:32], token[32:]
     session = await web_sessions.get_session(token)
@@ -1104,12 +1104,17 @@ async def index_file(token: str, collection_id: int, path: str):
         if access_type in access:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
             key = hash_reconstruct(session['hash1'], hash2)
-            collection_key = database.get_collection_key(
-                collection_id, session['user_id'], key)
-            collection_name = database.get_collection_name(collection_id)
-            database.add_log(
-                'index_file', 200, {'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=['/' + path.strip('/')])
+            try:
+                collection_key = database.get_collection_key(
+                    collection_id, session['user_id'], key)
+                collection_name = database.get_collection_name(collection_id)
+                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=['/' + path.strip('/')])
+                database.add_log(
+                    'indexing_file', 200, {'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            except Exception as error:
+                database.add_log('indexing_file', 500, {'error': str(
+                    error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+                raise error
         else:
             database.add_log(
                 'index_file', 403, {'error': f'{access_type} not in {access}', 'path': path}, user_id=session['user_id'], collection_id=collection_id)
