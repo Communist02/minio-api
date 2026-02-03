@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from typing import Tuple
 from sqlalchemy import BINARY, update, delete, String
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -52,60 +51,60 @@ class WebSessionsBase:
             await session.execute(query)
             await session.commit()
 
-    async def get_session(self, token: str) -> dict[str, str | int]:
-        token = hash_argon2_from_password(token)
+    async def get_session(self, token: str) -> dict | None:
+        token_bytes = hash_argon2_from_password(token)
         await self.remove_deprecation()
         async with AsyncSession(self.engine) as session:
             query = select(WebSession.user_id, WebSession.hash1,
-                           WebSession.jwt_token).where(WebSession.token == token)
+                           WebSession.jwt_token).where(WebSession.token == token_bytes)
             result = (await session.execute(query)).first()
             if result is None:
                 return None
             result = result.tuple()
             if result is not None:
-                await self.update_last_used(token)
+                await self.update_last_used(token_bytes)
                 return {'user_id': result[0], 'hash1': result[1], 'jwt_token': result[2]}
 
     async def get_user_id(self, token: str) -> int | None:
-        token = hash_argon2_from_password(token)
+        token_bytes = hash_argon2_from_password(token)
         await self.remove_deprecation()
         async with AsyncSession(self.engine) as session:
-            query = select(WebSession.user_id).where(WebSession.token == token)
+            query = select(WebSession.user_id).where(WebSession.token == token_bytes)
             user_id = (await session.execute(query)).scalar()
             if user_id is not None:
-                await self.update_last_used(token)
+                await self.update_last_used(token_bytes)
             return user_id
 
-    async def get_hash1(self, token: str) -> str | None:
-        token = hash_argon2_from_password(token)
+    async def get_hash1(self, token: str) -> bytes | None:
+        token_bytes = hash_argon2_from_password(token)
         await self.remove_deprecation()
         async with AsyncSession(self.engine) as session:
-            query = select(WebSession.hash1).where(WebSession.token == token)
+            query = select(WebSession.hash1).where(WebSession.token == token_bytes)
             hash1 = (await session.execute(query)).scalar()
             if hash1 is not None:
-                await self.update_last_used(token)
+                await self.update_last_used(token_bytes)
             return hash1
 
-    async def get_hash1_and_user_id(self, token: str) -> Tuple[bytes | int]:
-        token = hash_argon2_from_password(token)
+    async def get_hash1_and_user_id(self, token: str) -> tuple[bytes, int]:
+        token_bytes = hash_argon2_from_password(token)
         await self.remove_deprecation()
         async with AsyncSession(self.engine) as session:
             query = select(WebSession.hash1, WebSession.user_id).where(
-                WebSession.token == token)
+                WebSession.token == token_bytes)
             return await session.execute(query).first().tuple()
 
-    async def add_session(self, token: str, hash1: bytes, user_id: str, jwt_token: str):
-        token = hash_argon2_from_password(token)
+    async def add_session(self, token: str, hash1: bytes, user_id: int, jwt_token: str):
+        token_bytes = hash_argon2_from_password(token)
         async with AsyncSession(self.engine) as session:
             query = insert(WebSession).values(
-                token=token, hash1=hash1, user_id=user_id, created=datetime.now(), last_used=datetime.now(), jwt_token=jwt_token)
+                token=token_bytes, hash1=hash1, user_id=user_id, created=datetime.now(), last_used=datetime.now(), jwt_token=jwt_token)
             await session.execute(query)
             await session.commit()
 
-    async def delete_session(self, token: str) -> int | None:
-        token = hash_argon2_from_password(token)
+    async def delete_session(self, token: str) -> None:
+        token_bytes = hash_argon2_from_password(token)
         async with AsyncSession(self.engine) as session:
-            query = delete(WebSession).where(WebSession.token == token)
+            query = delete(WebSession).where(WebSession.token == token_bytes)
             await session.execute(query)
             await session.commit()
 

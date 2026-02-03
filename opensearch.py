@@ -77,7 +77,7 @@ class OpenSearchManager:
                 body={'backend_roles': [role_name]}
             )
 
-    async def get_document(self, doc_id: int, index_name: str = config.opensearch_collections_index) -> dict | None:
+    async def get_document(self, doc_id: int | str, index_name: str = config.opensearch_collections_index) -> dict | None:
         async with AsyncOpenSearch(
             hosts=[{'host': self.host, 'port': self.port}],
             http_compress=True,

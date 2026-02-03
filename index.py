@@ -4,26 +4,26 @@ import base64
 
 
 async def create_index(collection_id: int, collection_name: str, encryption_key: bytes, jwt_token: str, path: str):
-    encryption_key = base64.urlsafe_b64encode(encryption_key).decode()
+    encryption_key_str = base64.urlsafe_b64encode(encryption_key).decode()
     try:
         async with httpx.AsyncClient(verify=not config.debug_mode) as client:
             await client.post(
                 f'{config.index_api_url}/indexing_collection',
                 json={'collection_id': collection_id, 'collection_name': collection_name,
-                      'encryption_key': encryption_key, 'jwt_token': jwt_token, 'path': path},
+                      'encryption_key': encryption_key_str, 'jwt_token': jwt_token, 'path': path},
             )
     except httpx.TimeoutException as e:
         pass
 
 
 async def indexing_files(collection_id: int, collection_name: str, encryption_key: bytes, jwt_token: str, files: list[str]):
-    encryption_key = base64.urlsafe_b64encode(encryption_key).decode()
+    encryption_key_str = base64.urlsafe_b64encode(encryption_key).decode()
     try:
         async with httpx.AsyncClient(verify=not config.debug_mode) as client:
             await client.post(
                 f'{config.index_api_url}/indexing_files',
                 json={'collection_id': collection_id, 'collection_name': collection_name,
-                      'encryption_key': encryption_key, 'jwt_token': jwt_token, 'files': files},
+                      'encryption_key': encryption_key_str, 'jwt_token': jwt_token, 'files': files},
             )
     except httpx.TimeoutException as e:
         pass

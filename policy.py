@@ -44,7 +44,7 @@ async def create_policy_to_user(username: str, collections: list) -> str:
                     'collection_id': collection['id']
                 }
             })
-            bucket_policy = {'Effect': 'Allow'}
+            bucket_policy: dict = {'Effect': 'Allow'}
 
             match collection['access_type_id']:
                 case 1:
@@ -143,7 +143,7 @@ async def create_policy_to_all(collections: list) -> str:
             }
         })
 
-        bucket_policy = {'Effect': 'Allow'}
+        bucket_policy: dict = {'Effect': 'Allow'}
         bucket_policy['Action'] = [
             's3:GetBucketLocation',
             's3:GetObject',

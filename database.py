@@ -93,7 +93,7 @@ class Log(Base):
 
 
 @event.listens_for(AccessType.__table__, 'after_create')
-def insert_initial_data(target, connection, **kw):
+def insert_initial_access_types(target, connection, **kw):
     connection.execute(target.insert(), [
         {'id': 1, 'name': 'owner'},
         {'id': 2, 'name': 'readwrite'},
@@ -103,7 +103,7 @@ def insert_initial_data(target, connection, **kw):
 
 
 @event.listens_for(UserRole.__table__, 'after_create')
-def insert_initial_data(target, connection, **kw):
+def insert_initial_user_roles(target, connection, **kw):
     connection.execute(target.insert(), [
         {'id': 1, 'name': 'owner'},
         {'id': 2, 'name': 'admin'},
@@ -227,27 +227,27 @@ class MainBase:
                 encrypted_private_key, user_private_key)
             return group_private_key
 
-    def get_user_id(self, login: str) -> int:
+    def get_user_id(self, login: str) -> int | None:
         with Session(self.engine) as session:
             query = select(User.id).where(User.login == login)
             user_id = session.execute(query).scalar()
             return user_id
 
-    def get_username(self, user_id: int) -> int:
+    def get_username(self, user_id: int) -> str | None:
         with Session(self.engine) as session:
             query = select(User.login).where(User.id == user_id)
             username = session.execute(query).scalar()
             return username
 
-    def get_collections(self, user_id: int, collection_ids: list[int] = None, accessed_to_all: bool = False) -> list:
+    def get_collections(self, user_id: int, accessed_to_all: bool = False) -> list:
         owner = self.get_owner_collections(user_id)
         accessed = self.get_access_collections(user_id)
         group = self.get_group_collections(user_id)
+        accessed_to_all_list = []
+
         if accessed_to_all:
-            accessed_to_all = self.get_access_to_all_collections(user_id)
-        else:
-            accessed_to_all = []
-        return owner + accessed + group + accessed_to_all
+            accessed_to_all_list = self.get_access_to_all_collections(user_id)
+        return owner + accessed + group + accessed_to_all_list
 
     def get_owner_collections(self, user_id: int) -> list:
         result = []
@@ -293,7 +293,7 @@ class MainBase:
                     {'id': collection[0], 'name': collection[1], 'type': 'group', 'access_type_id': collection[2]})
             return result
 
-    def get_access_to_all_collections(self, user_id: int) -> list:
+    def get_access_to_all_collections(self, user_id: int) -> list[str | int]:
         result = []
         with Session(self.engine) as session:
             query = select(Collection.id, Collection.name).where(
@@ -550,7 +550,7 @@ class MainBase:
                     {'id': access_type[0], 'name': access_type[1]})
             return access_types
 
-    def transfer_power_to_group(self, group_id: int, owner_user_id: int, user_id: int) -> bool:
+    def transfer_power_to_group(self, group_id: int, owner_user_id: int, user_id: int) -> None:
         with Session(self.engine) as session:
             query = update(GroupUser).where(
                 (GroupUser.group_id == group_id) &
@@ -566,7 +566,7 @@ class MainBase:
                 session.execute(query)
                 session.commit()
 
-    def add_log(self, action: str, result: int, message: dict, user_id: int = None, group_id: int = None, collection_id: int = None):
+    def add_log(self, action: str, result: int, message: dict | None, user_id: int | None = None, group_id: int | None = None, collection_id: int | None = None):
         try:
             with Session(self.engine) as session:
                 query = insert(Log).values(date_time=datetime.now(), action=action,
@@ -644,7 +644,7 @@ class MainBase:
                 Collection.id == collection_id)
             return session.execute(query).scalar_one()
 
-    def change_access_type(self, access_id: int, user_id: int, access_type_id: int) -> bool:
+    def change_access_type(self, access_id: int, user_id: int, access_type_id: int) -> None:
         with Session(self.engine) as session:
             if access_type_id != 1:
                 query = update(AccessToCollection).where(
@@ -659,14 +659,14 @@ class MainBase:
                 session.execute(query)
                 session.commit()
 
-    def get_access_info(self, access_id: int) -> str:
+    def get_access_info(self, access_id: int) -> dict[str, int]:
         with Session(self.engine) as session:
             query = select(AccessToCollection.user_id, AccessToCollection.group_id).where(
                 AccessToCollection.id == access_id)
             result = session.execute(query).one()
             return {'user_id': result.user_id, 'group_id': result.group_id}
 
-    def change_group_info(self, user_id: int, group_id: int, title: str, description: str) -> bool:
+    def change_group_info(self, user_id: int, group_id: int, title: str, description: str) -> None:
         with Session(self.engine) as session:
             query = update(Group).where(
                 (Group.id == group_id) &

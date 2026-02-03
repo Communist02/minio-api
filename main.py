@@ -279,17 +279,17 @@ async def delete_files(collection_id: int, files: str, token: str):
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
-        files = files.split('|')
+        files_list = files.split('|')
         if access_type in access:
             try:
                 collection_name = database.get_collection_name(collection_id)
-                await minio.delete_files(collection_name, files, session['jwt_token'])
+                await minio.delete_files(collection_name, files_list, session['jwt_token'])
                 database.add_log(
-                    'delete_files', 200, {'files': files}, user_id=session['user_id'], collection_id=collection_id)
-                await index.delete_index(collection_id, collection_name, files)
+                    'delete_files', 200, {'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
+                await index.delete_index(collection_id, collection_name, files_list)
             except Exception as error:
                 database.add_log('delete_files', 500, {
-                                 'error': str(error), 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+                                 'error': str(error), 'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             database.add_log(
@@ -360,11 +360,11 @@ async def rename_file(collection_id: int, request: RenameRequest):
                 collection_key = database.get_collection_key(
                     collection_id, session['user_id'], key)
                 collection_name = database.get_collection_name(collection_id)
-                await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
-                new_paths = database.add_log(
+                new_paths = await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
+                database.add_log(
                     'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
                 await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=new_paths)
-                await index.delete_index(collection_id, collection_name, request.path)
+                await index.delete_index(collection_id, collection_name, [request.path])
             except Exception as error:
                 database.add_log('rename', 500, {
                                  'error': str(error), 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
@@ -436,7 +436,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
                 await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
                 database.add_log(
                     'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + '/' + file.filename.strip('/')])
+                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + ('/' + file.filename.strip('/')) if file.filename is not None else ''])
                 return file.filename
             except Exception as error:
                 database.add_log('upload_file', 500, {
@@ -472,7 +472,7 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
             auth=(username, credentials.password)
         )
     if response.status_code == 200:
-        jwt_token = response.json()
+        jwt_token: str = response.json()
         user_id = database.get_user_id(credentials.username)
         if user_id is None:
             user_id = database.add_user(
@@ -505,18 +505,20 @@ async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) 
     }
 
 
-@app.get('/check_session')  # safe+
-async def check(token: str) -> dict[str, int | bool]:
+@app.get('/session')  # safe+
+async def check_session(token: str) -> dict[str, int | bool]:
     user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
-        await create_policy_to_user(database.get_username(user_id),
-                                    database.get_collections(user_id))
+        username = database.get_username(user_id)
+        if username:
+            await create_policy_to_user(username,
+                                        database.get_collections(user_id))
         return {'authenticated': True, 'user_id': user_id}
     raise HTTPException(status_code=401, detail='Token not found')
 
 
-@app.delete('/delete_session')  # safe+
-async def check(token: str) -> bool:
+@app.delete('/session')  # safe+
+async def delete_session(token: str) -> bool:
     user_id = await web_sessions.get_user_id(token[:32])
     if user_id:
         await web_sessions.delete_session(token[:32])
