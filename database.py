@@ -111,7 +111,7 @@ def insert_initial_user_roles(target, connection, **kw):
     ])
 
 
-class MainBase:
+class MainDatabase:
     def __init__(self):
         self.engine = create_engine(
             f'mariadb+pymysql://{config.db_user}:{config.db_password}@localhost/main?charset=utf8mb4',

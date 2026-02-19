@@ -13,7 +13,7 @@ import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
 from sessions import WebSessionsBase
-from database import MainBase
+from database import MainDatabase
 from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
 import secrets
 import config
@@ -85,7 +85,7 @@ class SpecificListCollectionsRequest(BaseModel):
 
 
 web_sessions = WebSessionsBase()
-database = MainBase()
+database = MainDatabase()
 opensearch = OpenSearchManager()
 minio = MinIOClient(config.minio_url)
 
@@ -514,7 +514,7 @@ async def check_session(token: str) -> dict[str, int | bool]:
             await create_policy_to_user(username,
                                         database.get_collections(user_id))
         return {'authenticated': True, 'user_id': user_id}
-    raise HTTPException(status_code=401, detail='Token not found')
+    raise HTTPException(status_code=401, detail='Token invalid')
 
 
 @app.delete('/session')  # safe+
@@ -537,8 +537,9 @@ async def create_collection(request: CreateCollectionRequest):
                 request.name, session['user_id'])
             database.add_log('create_collection', 200,
                              {'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-            await create_policy_to_user(database.get_username(
-                session['user_id']), database.get_collections(session['user_id']))
+            username = database.get_username(session['user_id'])
+            if username:
+                await create_policy_to_user(username, database.get_collections(session['user_id']))
         except HTTPException as error:
             database.add_log('create_collection', error.status_code,
                              {'error': error.detail, 'name': request.name}, user_id=session['user_id'])
@@ -563,8 +564,10 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
                 request.collection_id, user_id, request.user_id, request.access_type_id, key)
             database.add_log('give_access_user_to_collection',
                              200, {'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
-            await create_policy_to_user(database.get_username(request.user_id),
-                                        database.get_collections(request.user_id))
+            username = database.get_username(user_id)
+            if username:
+                await create_policy_to_user(username,
+                                            database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('give_access_user_to_collection',
                              500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
@@ -635,8 +638,10 @@ async def add_user_to_group(request: AddUserToGroupRequest):
                 request.group_id, user_id, request.user_id, request.role_id, key)
             database.add_log('add_user_to_group', 200,
                              {'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
-            await create_policy_to_user(database.get_username(request.user_id),
-                                        database.get_collections(request.user_id))
+            username = database.get_username(request.user_id)
+            if username:
+                await create_policy_to_user(username,
+                                            database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('add_user_to_group', 500, {'error': str(
                 error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
@@ -670,8 +675,9 @@ async def remove_collection(token: str, collection_id: int):
         database.remove_collection(collection_id, session['user_id'])
         database.add_log('remove_collection', 200, {
                          'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
-        await create_policy_to_user(database.get_username(
-            session['user_id']), database.get_collections(session['user_id']))
+        username = database.get_username(session['user_id'])
+        if username:
+            await create_policy_to_user(username, database.get_collections(session['user_id']))
     else:
         raise HTTPException(
             status_code=401,
@@ -713,8 +719,10 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
             database.add_log('delete_access_to_collection', 200, {
                              'access_id': access_id}, user_id=user_id)
             if access_info['user_id'] is not None:
-                await create_policy_to_user(database.get_username(access_info['user_id']),
-                                            database.get_collections(access_info['user_id']))
+                username = database.get_username(access_info['user_id'])
+                if username:
+                    await create_policy_to_user(username,
+                                                database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
                 for user in database.get_group_users(access_info['group_id'], user_id):
                     await create_policy_to_user(
@@ -738,8 +746,9 @@ async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list 
             database.delete_user_to_group(group_id, user_id, req_user_id)
             database.add_log('delete_user_to_group', 200, {
                              'user_id': user_id}, user_id=req_user_id, group_id=group_id)
-            await create_policy_to_user(database.get_username(
-                user_id), database.get_collections(user_id))
+            username = database.get_username(user_id)
+            if username:
+                await create_policy_to_user(username, database.get_collections(user_id))
         except Exception as error:
             database.add_log('delete_user_to_group', 500, {'error': str(
                 error), 'user_id': user_id}, user_id=req_user_id, group_id=group_id)
@@ -802,8 +811,9 @@ async def exit_group(token: str, group_id: int):
             database.delete_user_to_group(group_id, user_id, user_id)
             database.add_log('exit_group', 200, {},
                              user_id=user_id, group_id=group_id)
-            await create_policy_to_user(database.get_username(user_id),
-                                        database.get_collections(user_id))
+            username = database.get_username(user_id)
+            if username:
+                await create_policy_to_user(username, database.get_collections(user_id))
         except Exception as error:
             database.add_log('exit_group', 500, {'error': str(error)},
                              user_id=user_id, group_id=group_id)
@@ -857,8 +867,9 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
                              user_id=user_id)
             access_info = database.get_access_info(access_id)
             if access_info['user_id'] is not None:
-                await create_policy_to_user(database.get_username(access_info['user_id']),
-                                            database.get_collections(access_info['user_id']))
+                username = database.get_username(access_info['user_id'])
+                if username:
+                    await create_policy_to_user(username, database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
                 for user in database.get_group_users(access_info['group_id'], user_id):
                     await create_policy_to_user(
