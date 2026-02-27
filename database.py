@@ -157,7 +157,6 @@ class MainDatabase:
 
     def create_group(self, user_id: int, title: str, description: str) -> int:
         with Session(self.engine) as session:
-            query = select(User.public_key).where(User.id == user_id)
             group_private_key, group_public_key = crypt.random_key_pair()
             query = insert(Group).values(
                 title=title, description=description, public_key=group_public_key).returning(Group.id)

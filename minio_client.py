@@ -21,7 +21,7 @@ class MinIOClient:
             self.endpoint, 'admin', 'password', secure=True, cert_check=self.cert_check)
 
     async def get_list_files(self, bucket_name: str, path: str, recursive: bool, jwt_token: str) -> list[dict]:
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -116,7 +116,7 @@ class MinIOClient:
         }
 
     async def get_buckets(self, jwt_token: str) -> list[str]:
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -153,7 +153,7 @@ class MinIOClient:
                 )
 
     async def delete_files(self, bucket_name: str, paths: list[str], jwt_token: str):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -210,7 +210,7 @@ class MinIOClient:
                 )
 
     async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, jwt_token: str, range_header: str | None = None) -> StreamingResponse:
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -298,7 +298,7 @@ class MinIOClient:
                 )
 
     async def download_files(self, bucket_name: str, file_paths: list, encryption_key: SseCustomerKey, jwt_token: str) -> StreamingResponse:
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -371,7 +371,7 @@ class MinIOClient:
                 )
 
     async def copy_files(self, source_bucket_name: str, source_paths: list[str], destination_bucket_name: str, destination_path: str, source_encryption_key: SseCustomerKey, destination_encryption_key: SseCustomerKey, jwt_token: str):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -445,7 +445,7 @@ class MinIOClient:
                         )
 
     async def rename_file(self, bucket_name: str, path: str, new_name: str, encryption_key: SseCustomerKey, jwt_token: str) -> list:
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -527,7 +527,7 @@ class MinIOClient:
         return new_paths
 
     async def upload_file(self, bucket_name: str, file: UploadFile, path: str, encryption_key: SseCustomerKey, jwt_token: str, overwrite=True):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -565,7 +565,7 @@ class MinIOClient:
         )
 
     async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey, jwt_token: str):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -598,7 +598,7 @@ class MinIOClient:
                 )
 
     async def create_bucket(self, bucket_name: str, jwt_token: str):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,
@@ -636,7 +636,7 @@ class MinIOClient:
                 )
 
     async def remove_bucket(self, bucket_name: str, jwt_token: str):
-        auth = await get_sts_token(jwt_token, 'https://' + config.minio_url, 0)
+        auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
                 status_code=500,

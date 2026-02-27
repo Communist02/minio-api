@@ -1,21 +1,19 @@
 import base64
 from contextlib import asynccontextmanager
-from typing import Annotated
+import httpx
 from minio.sse import SseCustomerKey
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-import httpx
+from fastapi.security import HTTPBasic
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
-from sessions import WebSessionsBase
+import sessions
 from database import MainDatabase
-from crypt import hash_argon2_from_password, hash_division, hash_reconstruct
-import secrets
+from crypt import hash_reconstruct
 import config
 from opensearch import OpenSearchManager
 
@@ -84,21 +82,22 @@ class SpecificListCollectionsRequest(BaseModel):
     collection_ids: list[int]
 
 
-web_sessions = WebSessionsBase()
 database = MainDatabase()
 opensearch = OpenSearchManager()
-minio = MinIOClient(config.minio_url)
+minio = MinIOClient(config.s3_url)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await create_policy_to_all(database.get_absolute_access_to_all_collections())
-
     # Инициализация при запуске
-    await web_sessions.initialize()
+    try:
+        await create_policy_to_all(database.get_absolute_access_to_all_collections())
+    except httpx.ConnectError:
+        print('Не удалось подключится к S3 хранилищу и/или Opensearch')
+    # await web_sessions.initialize()
     yield
     # Завершение при остановке
-    await web_sessions.close()
+    # await web_sessions.close()
 
 app = FastAPI(lifespan=lifespan)
 security = HTTPBasic()
@@ -113,9 +112,9 @@ app.add_middleware(
 
 @app.get('/collections/list/{token}')
 async def get_list_collections(token: str) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_collections(user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_collections(session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -125,9 +124,9 @@ async def get_list_collections(token: str) -> list | None:
 
 @app.post('/collections/specific_list')
 async def get_specific_list_collections(request: SpecificListCollectionsRequest) -> list:
-    user_id = await web_sessions.get_user_id(request.token[:32])
-    if user_id:
-        return database.get_specific_access_to_all_collections(user_id, request.collection_ids)
+    session = await sessions.get_session(request.token[:32])
+    if session:
+        return database.get_specific_access_to_all_collections(session['user_id'], request.collection_ids)
     else:
         raise HTTPException(
             status_code=401,
@@ -138,7 +137,7 @@ async def get_specific_list_collections(request: SpecificListCollectionsRequest)
 @app.get('/collections/{collection_id}/list/{token}/{path:path}')  # access+
 async def get_list_files(token: str, collection_id: int, path: str, recursive: bool = True) -> list | None:
     access = [1, 2, 3, 4]
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
@@ -163,7 +162,7 @@ async def get_list_files(token: str, collection_id: int, path: str, recursive: b
 async def get_file(collection_id: int, path: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
@@ -194,7 +193,7 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
 async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
@@ -226,7 +225,7 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
 async def get_list_files_http(collection_id: int, token: str, request: Request, path: str = ''):
     access = [1, 2, 3]
     hash2 = token[32:]
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             if path:
@@ -275,7 +274,7 @@ async def get_list_files_http(collection_id: int, token: str, request: Request, 
 @app.delete('/collections/{collection_id}/{token}')  # access+
 async def delete_files(collection_id: int, files: str, token: str):
     access = [1, 2]
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -310,7 +309,7 @@ async def copy_files(request: CopyRequest):
     access = [1, 2, 3]
     access_dest = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
             try:
@@ -349,7 +348,7 @@ async def copy_files(request: CopyRequest):
 async def rename_file(collection_id: int, request: RenameRequest):
     access = [1, 2]
     token, hash2 = request.token[:32], request.token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -387,7 +386,7 @@ async def rename_file(collection_id: int, request: RenameRequest):
 async def create_folder(collection_id: int, request: NewFolderRequest):
     access = [1, 2, 4]
     token, hash2 = request.token[:32], request.token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -422,7 +421,7 @@ async def create_folder(collection_id: int, request: NewFolderRequest):
 async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
     access = [1, 2, 4]
     token, hash2 = token[:32], token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])
@@ -456,80 +455,31 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, token: st
         )
 
 
-@app.get('/auth')  # safe+ logs+
-async def auth(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> dict[str, int | str | bool]:
-    username = credentials.username.strip('/')
-    if username.find('/') == -1:
-        org = 'default'
-    else:
-        username, org = credentials.username.split(
-            '/')[0], credentials.username.split('/')[-1]
-    if org == 'default' or org == '':
-        credentials.username = username
-    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
-        response = await client.post(
-            f'{config.auth_api_url}/login?org={org}',
-            auth=(username, credentials.password)
-        )
-    if response.status_code == 200:
-        jwt_token: str = response.json()
-        user_id = database.get_user_id(credentials.username)
-        if user_id is None:
-            user_id = database.add_user(
-                credentials.username, credentials.password)
-            database.add_log(
-                'new_user', 200, {'login': credentials.username}, user_id=user_id)
-    else:
-        database.add_log(
-            'auth', 401, {'login': credentials.username}, user_id=None)
-        raise HTTPException(
-            status_code=401,
-            detail='Incorrect username or password',
-            headers={'WWW-Authenticate': 'Basic'},
-        )
-    key = hash_argon2_from_password(credentials.password)
-    hash1, hash2 = hash_division(key)
-    token = secrets.token_urlsafe(24)[:32]
-    await web_sessions.add_session(
-        token, hash1, user_id, jwt_token)
-    hash2 = base64.urlsafe_b64encode(hash2).decode()
-
-    await create_policy_to_user(username, database.get_collections(user_id))
-
-    database.add_log(
-        'auth', 200, {'login': credentials.username}, user_id=user_id)
-    return {
-        'token': token + hash2,
-        'user_id': user_id,
-        'username': username
-    }
-
-
 @app.get('/session')  # safe+
 async def check_session(token: str) -> dict[str, int | bool]:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        username = database.get_username(user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        username = database.get_username(session['user_id'])
         if username:
             await create_policy_to_user(username,
-                                        database.get_collections(user_id))
-        return {'authenticated': True, 'user_id': user_id}
+                                        database.get_collections(session['user_id']))
+        return {'authenticated': True, 'user_id': session['user_id']}
     raise HTTPException(status_code=401, detail='Token invalid')
 
 
 @app.delete('/session')  # safe+
 async def delete_session(token: str) -> bool:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        await web_sessions.delete_session(token[:32])
+    session = await sessions.get_session(token[:32])
+    if session:
+        await sessions.delete_session(token[:32])
         return True
     else:
         return False
 
 
 @app.post('/create_collection')  # safe+ logs+
-async def create_collection(request: CreateCollectionRequest):
-    session = await web_sessions.get_session(request.token[:32])
+async def create_collection(request: CreateCollectionRequest) -> int:
+    session = await sessions.get_session(request.token[:32])
     if session:
         try:
             await minio.create_bucket(request.name, session['jwt_token'])
@@ -555,22 +505,22 @@ async def create_collection(request: CreateCollectionRequest):
 @app.post('/give_access_user_to_collection')  # safe+ access- logs+
 async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = await sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
+        key = hash_reconstruct(session['hash1'], hash2)
         try:
             database.give_access_user_to_collection(
-                request.collection_id, user_id, request.user_id, request.access_type_id, key)
+                request.collection_id, session['user_id'], request.user_id, request.access_type_id, key)
             database.add_log('give_access_user_to_collection',
-                             200, {'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
-            username = database.get_username(user_id)
+                             200, {'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
+            username = database.get_username(session['user_id'])
             if username:
                 await create_policy_to_user(username,
                                             database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('give_access_user_to_collection',
-                             500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=user_id, collection_id=request.collection_id)
+                             500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
             raise error
     else:
         raise HTTPException(
@@ -582,16 +532,16 @@ async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequ
 @app.post('/create_group')  # safe+ logs+
 async def create_group(request: CreateGroupRequest):
     token = request.token[:32]
-    user_id = await web_sessions.get_user_id(token)
-    if user_id:
+    session = await sessions.get_session(token)
+    if session:
         try:
             group_id = database.create_group(
-                user_id, request.title, request.description)
+                session['user_id'], request.title, request.description)
             database.add_log(
-                'create_group', 200, {'title': request.title, 'description': request.description}, user_id=user_id, group_id=group_id)
+                'create_group', 200, {'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=group_id)
         except Exception as error:
             database.add_log('create_group', 500, {'error': str(
-                error), 'title': request.title, 'description': request.description}, user_id=user_id)
+                error), 'title': request.title, 'description': request.description}, user_id=session['user_id'])
             raise error
     else:
         raise HTTPException(
@@ -603,21 +553,21 @@ async def create_group(request: CreateGroupRequest):
 @app.post('/give_access_group_to_collection')  # safe+ access- logs+
 async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = await sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
+        key = hash_reconstruct(session['hash1'], hash2)
         try:
             access_id = database.give_access_group_to_collection(
-                request.collection_id, user_id, request.group_id, request.access_type_id, key)
+                request.collection_id, session['user_id'], request.group_id, request.access_type_id, key)
             database.add_log('give_access_group_to_collection',
-                             200, {'access_id': access_id}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
-            for user in database.get_group_users(request.group_id, user_id):
+                             200, {'access_id': access_id}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
+            for user in database.get_group_users(request.group_id, session['user_id']):
                 await create_policy_to_user(
                     user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('give_access_group_to_collection',
-                             500, {'error': str(error)}, user_id=user_id, group_id=request.group_id, collection_id=request.collection_id)
+                             500, {'error': str(error)}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
             raise error
     else:
         raise HTTPException(
@@ -629,22 +579,22 @@ async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRe
 @app.post('/add_user_to_group')  # safe+ logs+
 async def add_user_to_group(request: AddUserToGroupRequest):
     token, hash2 = request.token[:32], request.token[32:]
-    hash1, user_id = await web_sessions.get_hash1_and_user_id(token)
-    if user_id:
+    session = await sessions.get_session(token)
+    if session:
         hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(hash1, hash2)
+        key = hash_reconstruct(session['hash1'], hash2)
         try:
             database.add_user_to_group(
-                request.group_id, user_id, request.user_id, request.role_id, key)
+                request.group_id, session['user_id'], request.user_id, request.role_id, key)
             database.add_log('add_user_to_group', 200,
-                             {'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
+                             {'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
             username = database.get_username(request.user_id)
             if username:
                 await create_policy_to_user(username,
                                             database.get_collections(request.user_id))
         except Exception as error:
             database.add_log('add_user_to_group', 500, {'error': str(
-                error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=user_id, group_id=request.group_id)
+                error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
             raise error
     else:
         raise HTTPException(
@@ -655,14 +605,19 @@ async def add_user_to_group(request: AddUserToGroupRequest):
 
 @app.get('/get_groups')  # safe+
 async def get_groups(token: str) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_groups(user_id)
+    session = await sessions.get_session(token)
+    if session:
+        return database.get_groups(session['user_id'])
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail='Token invalid'
+        )
 
 
 @app.delete('/remove_collection')  # safe+ logs+
 async def remove_collection(token: str, collection_id: int):
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         collection_name = database.get_collection_name(collection_id)
         try:
@@ -687,9 +642,9 @@ async def remove_collection(token: str, collection_id: int):
 
 @app.get('/get_other_users')  # safe+
 async def get_other_users(token: str) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_other_users(user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_other_users(session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -699,9 +654,9 @@ async def get_other_users(token: str) -> list | None:
 
 @app.get('/get_access_to_collection')  # safe+
 async def get_access_to_collection(token: str, collection_id: int) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_access_to_collection(collection_id, user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_access_to_collection(collection_id, session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -711,25 +666,25 @@ async def get_access_to_collection(token: str, collection_id: int) -> list | Non
 
 @app.delete('/delete_access_to_collection')  # safe+ logs+
 async def delete_access_to_collection(token: str, access_id: int) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
             access_info = database.get_access_info(access_id)
-            database.delete_access_to_collection(access_id, user_id)
+            database.delete_access_to_collection(access_id, session['user_id'])
             database.add_log('delete_access_to_collection', 200, {
-                             'access_id': access_id}, user_id=user_id)
+                             'access_id': access_id}, user_id=session['user_id'])
             if access_info['user_id'] is not None:
                 username = database.get_username(access_info['user_id'])
                 if username:
                     await create_policy_to_user(username,
                                                 database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
-                for user in database.get_group_users(access_info['group_id'], user_id):
+                for user in database.get_group_users(access_info['group_id'], session['user_id']):
                     await create_policy_to_user(
                         user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('delete_access_to_collection', 500, {
-                             'error': str(error), 'access_id': access_id}, user_id=user_id)
+                             'error': str(error), 'access_id': access_id}, user_id=session['user_id'])
             raise error
     else:
         raise HTTPException(
@@ -740,18 +695,18 @@ async def delete_access_to_collection(token: str, access_id: int) -> list | None
 
 @app.delete('/delete_user_to_group')  # safe+ logs+
 async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list | None:
-    req_user_id = await web_sessions.get_user_id(token[:32])
-    if req_user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
-            database.delete_user_to_group(group_id, user_id, req_user_id)
+            database.delete_user_to_group(group_id, user_id, session['user_id'])
             database.add_log('delete_user_to_group', 200, {
-                             'user_id': user_id}, user_id=req_user_id, group_id=group_id)
+                             'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
             username = database.get_username(user_id)
             if username:
                 await create_policy_to_user(username, database.get_collections(user_id))
         except Exception as error:
             database.add_log('delete_user_to_group', 500, {'error': str(
-                error), 'user_id': user_id}, user_id=req_user_id, group_id=group_id)
+                error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
             raise error
     else:
         raise HTTPException(
@@ -762,9 +717,9 @@ async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list 
 
 @app.get('/get_group_users')  # safe+
 async def get_group_users(token: str, group_id: int) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_group_users(group_id, user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_group_users(group_id, session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -774,8 +729,8 @@ async def get_group_users(token: str, group_id: int) -> list | None:
 
 @app.get('/get_access_types')  # safe+
 async def get_access_types(token: str) -> list | None:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         return database.get_access_types()
     else:
         raise HTTPException(
@@ -786,15 +741,15 @@ async def get_access_types(token: str) -> list | None:
 
 @app.post('/transfer_power_to_group')  # safe+
 async def transfer_power_to_group(token: str, group_id: int, user_id: int):
-    owner_user_id = await web_sessions.get_user_id(token[:32])
-    if owner_user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
-            database.transfer_power_to_group(group_id, owner_user_id, user_id)
+            database.transfer_power_to_group(group_id, session['user_id'], user_id)
             database.add_log('transfer_power_to_group', 200, {
-                             'user_id': user_id}, user_id=owner_user_id, group_id=group_id)
+                             'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
         except Exception as error:
             database.add_log('transfer_power_to_group', 500, {'error': str(
-                error), 'user_id': user_id}, user_id=owner_user_id, group_id=group_id)
+                error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
             raise error
     else:
         raise HTTPException(
@@ -805,18 +760,18 @@ async def transfer_power_to_group(token: str, group_id: int, user_id: int):
 
 @app.delete('/exit_group')  # safe+ logs+
 async def exit_group(token: str, group_id: int):
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
-            database.delete_user_to_group(group_id, user_id, user_id)
+            database.delete_user_to_group(group_id, session['user_id'], session['user_id'])
             database.add_log('exit_group', 200, {},
-                             user_id=user_id, group_id=group_id)
-            username = database.get_username(user_id)
+                             user_id=session['user_id'], group_id=group_id)
+            username = database.get_username(session['user_id'])
             if username:
-                await create_policy_to_user(username, database.get_collections(user_id))
+                await create_policy_to_user(username, database.get_collections(session['user_id']))
         except Exception as error:
             database.add_log('exit_group', 500, {'error': str(error)},
-                             user_id=user_id, group_id=group_id)
+                             user_id=session['user_id'], group_id=group_id)
             raise error
     else:
         raise HTTPException(
@@ -827,16 +782,16 @@ async def exit_group(token: str, group_id: int):
 
 @app.post('/change_role_in_group')  # safe+ logs+
 async def change_role_in_group(token: str, group_id: int, user_id: int, role_id: int):
-    owner_user_id = await web_sessions.get_user_id(token[:32])
-    if owner_user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
             database.change_role_in_group(
-                group_id, owner_user_id, user_id, role_id)
+                group_id, session['user_id'], user_id, role_id)
             database.add_log('change_role_in_group', 200, {'user_id': user_id, 'role_id': role_id},
-                             user_id=owner_user_id, group_id=group_id)
+                             user_id=session['user_id'], group_id=group_id)
         except Exception as error:
             database.add_log('change_role_in_group', 500, {'error': str(error), 'user_id': user_id, 'role_id': role_id},
-                             user_id=owner_user_id, group_id=group_id)
+                             user_id=session['user_id'], group_id=group_id)
             raise error
     else:
         raise HTTPException(
@@ -847,9 +802,9 @@ async def change_role_in_group(token: str, group_id: int, user_id: int, role_id:
 
 @app.get('/get_user_info')  # safe+
 async def get_user_info(token: str) -> dict[str, int | str]:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_user_info(user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_user_info(session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -859,24 +814,24 @@ async def get_user_info(token: str) -> dict[str, int | str]:
 
 @app.post('/change_access_type')  # safe+ logs+
 async def change_access_type(token: str, access_id: int, access_type_id: int):
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
+    session = await sessions.get_session(token[:32])
+    if session:
         try:
-            database.change_access_type(access_id, user_id, access_type_id)
+            database.change_access_type(access_id, session['user_id'], access_type_id)
             database.add_log('change_access_type', 200, {'access_id': access_id, 'access_type_id': access_type_id},
-                             user_id=user_id)
+                             user_id=session['user_id'])
             access_info = database.get_access_info(access_id)
             if access_info['user_id'] is not None:
                 username = database.get_username(access_info['user_id'])
                 if username:
                     await create_policy_to_user(username, database.get_collections(access_info['user_id']))
             elif access_info['group_id'] is not None:
-                for user in database.get_group_users(access_info['group_id'], user_id):
+                for user in database.get_group_users(access_info['group_id'], session['user_id']):
                     await create_policy_to_user(
                         user['username'], database.get_collections(user['id']))
         except Exception as error:
             database.add_log('change_access_type', 500, {'error': str(
-                error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=user_id)
+                error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=session['user_id'])
             raise error
     else:
         raise HTTPException(
@@ -887,16 +842,16 @@ async def change_access_type(token: str, access_id: int, access_type_id: int):
 
 @app.post('/change_group_info')  # safe+ logs+
 async def change_group_info(request: ChangeGroupInfoRequest):
-    user_id = await web_sessions.get_user_id(request.token[:32])
-    if user_id:
+    session = await sessions.get_session(request.token[:32])
+    if session:
         try:
             database.change_group_info(
-                user_id, request.group_id, request.title, request.description)
+                session['user_id'], request.group_id, request.title, request.description)
             database.add_log('change_group_info', 200, {'title': request.title, 'description': request.description},
-                             user_id=user_id, group_id=request.group_id)
+                             user_id=session['user_id'], group_id=request.group_id)
         except Exception as error:
             database.add_log('change_group_info', 500, {'error': str(
-                error), 'title': request.title, 'description': request.description}, user_id=user_id, group_id=request.group_id)
+                error), 'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=request.group_id)
             raise error
     else:
         raise HTTPException(
@@ -907,9 +862,9 @@ async def change_group_info(request: ChangeGroupInfoRequest):
 
 @app.get('/get_logs')  # safe+
 async def get_logs(token: str) -> list:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_logs(user_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_logs(session['user_id'])
     else:
         raise HTTPException(
             status_code=401,
@@ -919,9 +874,9 @@ async def get_logs(token: str) -> list:
 
 @app.get('/get_history_collection')  # safe+
 async def get_history_collection(token: str, collection_id: int) -> list:
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        return database.get_history_collection(user_id, collection_id)
+    session = await sessions.get_session(token[:32])
+    if session:
+        return database.get_history_collection(session['user_id'], collection_id)
     else:
         raise HTTPException(
             status_code=401,
@@ -932,19 +887,19 @@ async def get_history_collection(token: str, collection_id: int) -> list:
 @app.post('/change_collection_info')  # safe+ logs+
 async def change_collection_info(token: str, collection_id: int, data: dict):
     access = [1]
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        if database.get_type_access(collection_id, user_id) in access:
+    session = await sessions.get_session(token[:32])
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             try:
                 data['collection_id'] = collection_id
                 data['collection_name'] = database.get_collection_name(
                     collection_id)
                 await opensearch.update_document(collection_id, data)
                 database.add_log('change_collection_info', 200, None,
-                                 user_id=user_id, collection_id=collection_id)
+                                 user_id=session['user_id'], collection_id=collection_id)
             except Exception as error:
                 database.add_log('change_collection_info', 500, {'error': str(
-                    error), 'data': data}, user_id=user_id, collection_id=collection_id)
+                    error), 'data': data}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             raise HTTPException(
@@ -961,14 +916,14 @@ async def change_collection_info(token: str, collection_id: int, data: dict):
 @app.get('/get_collection_info')  # safe+ logs+
 async def get_collection_info(token: str, collection_id: int):
     access = [1, 2, 3, 4]
-    user_id = await web_sessions.get_user_id(token[:32])
-    if user_id:
-        if database.get_type_access(collection_id, user_id) in access:
+    session = await sessions.get_session(token[:32])
+    if session:
+        if database.get_type_access(collection_id, session['user_id']) in access:
             try:
                 return await opensearch.get_document(collection_id)
             except Exception as error:
                 database.add_log('get_collection_info', 500, {'error': str(
-                    error)}, user_id=user_id, collection_id=collection_id)
+                    error)}, user_id=session['user_id'], collection_id=collection_id)
                 raise error
         else:
             raise HTTPException(
@@ -986,7 +941,7 @@ async def get_collection_info(token: str, collection_id: int):
 @app.get('/collections/{collection_id}/file_info/{token}/{path:path}')
 async def get_file_info(token: str, collection_id: int, path: str, is_dir: bool):
     access = [1, 2, 3, 4]
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
@@ -1012,7 +967,7 @@ async def get_file_info(token: str, collection_id: int, path: str, is_dir: bool)
 
 @app.get('/search_collections')  # safe+ logs+
 async def search_collection(text: str, token: str) -> list:
-    session = await web_sessions.get_session(token[:32])
+    session = await sessions.get_session(token[:32])
     if session:
         try:
             collections_result = []
@@ -1083,7 +1038,7 @@ async def search_collection(text: str, token: str) -> list:
 @app.post('/change_access_to_all')  # safe+ logs+
 async def change_access_to_all(token: str, collection_id: int, is_access: bool):
     token, hash2 = token[:32], token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) == 1:
             hash2 = base64.urlsafe_b64decode(hash2.encode())
@@ -1110,7 +1065,7 @@ async def change_access_to_all(token: str, collection_id: int, is_access: bool):
 async def indexing_file(token: str, collection_id: int, path: str):
     access = [1, 2, 3, 4]
     token, hash2 = token[:32], token[32:]
-    session = await web_sessions.get_session(token)
+    session = await sessions.get_session(token)
     if session:
         access_type = database.get_type_access(
             collection_id, session['user_id'])

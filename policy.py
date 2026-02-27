@@ -1,4 +1,5 @@
 import json
+import httpcore
 from httpx_aws_auth import AwsSigV4Auth, AwsCredentials
 import httpx
 import config
@@ -86,7 +87,7 @@ async def create_policy_to_user(username: str, collections: list) -> str:
     )
     async with httpx.AsyncClient(verify=not config.debug_mode) as client:
         response = await client.put(
-            f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
+            f'https://{config.s3_url}/minio/admin/v3/add-canned-policy',
             params={'name': username},
             headers={'Content-Type': 'application/json'},
             auth=auth,
@@ -158,16 +159,19 @@ async def create_policy_to_all(collections: list) -> str:
         region='us-east-1',
         service='s3'
     )
-
-    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
-        response = await client.put(
-            f'https://{config.minio_url}/minio/admin/v3/add-canned-policy',
-            params={'name': 'all/system'},
-            headers={'Content-Type': 'application/json'},
-            auth=auth,
-            json=policy,
-            timeout=5
-        )
+    try:
+        async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+            response = await client.put(
+                f'https://{config.s3_url}/minio/admin/v3/add-canned-policy',
+                params={'name': 'all/system'},
+                headers={'Content-Type': 'application/json'},
+                auth=auth,
+                json=policy,
+                timeout=5
+            )
+    except httpcore.ConnectError as error:
+        print('Не удалось подключится к хранилищу s3')
+        raise error
     if response.status_code != 200:
         print('Ошибка создания политики:', response.status_code)
         print(response.text)

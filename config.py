@@ -1,4 +1,4 @@
-minio_url = "localhost:9000"
+s3_url = "localhost:9000"
 auth_api_url = "http://localhost:8080"
 index_api_url = "http://localhost:8010"
 access_key = "admin"
