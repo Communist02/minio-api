@@ -2,12 +2,11 @@ import base64
 from contextlib import asynccontextmanager
 import httpx
 from minio.sse import SseCustomerKey
-from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import quote
-from fastapi.security import HTTPBasic
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
@@ -16,6 +15,7 @@ from database import MainDatabase
 from crypt import hash_reconstruct
 import config
 from opensearch import OpenSearchManager
+from validate import get_current_user
 
 
 class CopyRequest(BaseModel):
@@ -23,62 +23,52 @@ class CopyRequest(BaseModel):
     source_paths: list[str]
     destination_collection_id: int
     destination_path: str
-    token: str
 
 
 class RenameRequest(BaseModel):
     path: str
     new_name: str
-    token: str
 
 
 class NewFolderRequest(BaseModel):
     name: str
     path: str
-    token: str
 
 
 class CreateCollectionRequest(BaseModel):
-    token: str
     name: str
 
 
 class CreateGroupRequest(BaseModel):
-    token: str
     title: str
     description: str
 
 
 class GiveAccessUserToCollectionRequest(BaseModel):
-    token: str
     collection_id: int
     user_id: int
     access_type_id: int
 
 
 class GiveAccessGroupToCollectionRequest(BaseModel):
-    token: str
     collection_id: int
     group_id: int
     access_type_id: int
 
 
 class AddUserToGroupRequest(BaseModel):
-    token: str
     group_id: int
     user_id: int
     role_id: int
 
 
 class ChangeGroupInfoRequest(BaseModel):
-    token: str
     group_id: int
     title: str
     description: str
 
 
 class SpecificListCollectionsRequest(BaseModel):
-    token: str
     collection_ids: list[int]
 
 
@@ -100,7 +90,6 @@ async def lifespan(app: FastAPI):
     # await web_sessions.close()
 
 app = FastAPI(lifespan=lifespan)
-security = HTTPBasic()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -110,51 +99,30 @@ app.add_middleware(
 )
 
 
-@app.get('/collections/list/{token}')
-async def get_list_collections(token: str) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_collections(session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+@app.get('/collections/list')
+async def get_list_collections(session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_collections(session['user_id'])
 
 
 @app.post('/collections/specific_list')
-async def get_specific_list_collections(request: SpecificListCollectionsRequest) -> list:
-    session = await sessions.get_session(request.token[:32])
-    if session:
-        return database.get_specific_access_to_all_collections(session['user_id'], request.collection_ids)
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_specific_list_collections(request: SpecificListCollectionsRequest, session: dict = Depends(get_current_user)) -> list:
+    return database.get_specific_access_to_all_collections(session['user_id'], request.collection_ids)
 
 
-@app.get('/collections/{collection_id}/list/{token}/{path:path}')  # access+
-async def get_list_files(token: str, collection_id: int, path: str, recursive: bool = True) -> list | None:
+@app.get('/collections/{collection_id}/list/{path:path}')  # access+
+async def get_list_files(collection_id: int, path: str, recursive: bool = True, session: dict = Depends(get_current_user)) -> list | None:
     access = [1, 2, 3, 4]
-    session = await sessions.get_session(token[:32])
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
-            except HTTPException as error:
-                database.add_log('get_list_files', error.status_code,
-                                 {'error': error.detail, 'path': path, 'recursive': recursive}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            return await minio.get_list_files(database.get_collection_name(collection_id), path, recursive, session['jwt_token'])
+        except HTTPException as error:
+            database.add_log('get_list_files', error.status_code,
+                             {'error': error.detail, 'path': path, 'recursive': recursive}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
@@ -189,32 +157,23 @@ async def get_file(collection_id: int, path: str, token: str, request: Request, 
         )
 
 
-@app.get('/collections/{collection_id}/archive/{token}')  # access+
-async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
+@app.get('/collections/{collection_id}/archive')  # access+
+async def get_files(collection_id: int, files: str, session: dict = Depends(get_current_user)) -> StreamingResponse:
     access = [1, 2, 3]
-    token, hash2 = token[:32], token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
-            except Exception as error:
-                database.add_log('get_files', 500, {
-                                 'error': str(error), 'files': files}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            return await minio.download_files(database.get_collection_name(collection_id), files.split('|'), SseCustomerKey(collection_key), session['jwt_token'])
+        except Exception as error:
+            database.add_log('get_files', 500, {
+                'error': str(error), 'files': files}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
@@ -271,200 +230,153 @@ async def get_list_files_http(collection_id: int, token: str, request: Request, 
         )
 
 
-@app.delete('/collections/{collection_id}/{token}')  # access+
-async def delete_files(collection_id: int, files: str, token: str):
+@app.delete('/collections/{collection_id}')  # access+
+async def delete_files(collection_id: int, files: str, session: dict = Depends(get_current_user)):
     access = [1, 2]
-    session = await sessions.get_session(token[:32])
-    if session:
-        access_type = database.get_type_access(
-            collection_id, session['user_id'])
-        files_list = files.split('|')
-        if access_type in access:
-            try:
-                collection_name = database.get_collection_name(collection_id)
-                await minio.delete_files(collection_name, files_list, session['jwt_token'])
-                database.add_log(
-                    'delete_files', 200, {'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
-                await index.delete_index(collection_id, collection_name, files_list)
-            except Exception as error:
-                database.add_log('delete_files', 500, {
-                                 'error': str(error), 'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
+    access_type = database.get_type_access(
+        collection_id, session['user_id'])
+    files_list = files.split('|')
+    if access_type in access:
+        try:
+            collection_name = database.get_collection_name(collection_id)
+            await minio.delete_files(collection_name, files_list, session['jwt_token'])
             database.add_log(
-                'delete_files', 403, {'error': f'{access_type} not in {access}', 'files': files}, user_id=session['user_id'], collection_id=collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+                'delete_files', 200, {'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
+            await index.delete_index(collection_id, collection_name, files_list)
+        except Exception as error:
+            database.add_log('delete_files', 500, {
+                'error': str(error), 'files': files_list}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
+        database.add_log(
+            'delete_files', 403, {'error': f'{access_type} not in {access}', 'files': files}, user_id=session['user_id'], collection_id=collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.post('/copy')  # access+
-async def copy_files(request: CopyRequest):
+async def copy_files(request: CopyRequest, session: dict = Depends(get_current_user)):
     access = [1, 2, 3]
     access_dest = [1, 2, 4]
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
-            try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
-                source_collection_key = database.get_collection_key(
-                    request.source_collection_id, session['user_id'], key)
-                destination_collection_key = database.get_collection_key(
-                    request.destination_collection_id, session['user_id'], key)
-                collection_name = database.get_collection_name(
-                    request.destination_collection_id)
-                await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, collection_name, request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
-                database.add_log('copy_files', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
-                                                     'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
-                await index.create_index(request.destination_collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(request.destination_collection_id, session['user_id'], key), path=request.destination_path)
-            except Exception as error:
-                database.add_log('copy_files', 500, {
-                                 'error': str(error), 'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
-                                 'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
-                raise error
-        else:
-            database.add_log('copy_files', 403, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
-                             'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+    if database.get_type_access(request.source_collection_id, session['user_id']) in access and database.get_type_access(request.destination_collection_id, session['user_id']) in access_dest:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            source_collection_key = database.get_collection_key(
+                request.source_collection_id, session['user_id'], key)
+            destination_collection_key = database.get_collection_key(
+                request.destination_collection_id, session['user_id'], key)
+            collection_name = database.get_collection_name(
+                request.destination_collection_id)
+            await minio.copy_files(database.get_collection_name(request.source_collection_id), request.source_paths, collection_name, request.destination_path, SseCustomerKey(source_collection_key), SseCustomerKey(destination_collection_key), session['jwt_token'])
+            database.add_log('copy_files', 200, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+                                                 'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
+            await index.create_index(request.destination_collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=database.get_collection_key(request.destination_collection_id, session['user_id'], key), path=request.destination_path)
+        except Exception as error:
+            database.add_log('copy_files', 500, {
+                'error': str(error), 'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+                'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
+            raise error
     else:
+        database.add_log('copy_files', 403, {'source_collection_id': request.source_collection_id, 'source_paths': request.source_paths,
+                                             'destination_path': request.destination_path}, user_id=session['user_id'], collection_id=request.destination_collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.post('/collections/{collection_id}/rename')  # access+
-async def rename_file(collection_id: int, request: RenameRequest):
+async def rename_file(collection_id: int, request: RenameRequest, session: dict = Depends(get_current_user)):
     access = [1, 2]
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        access_type = database.get_type_access(
-            collection_id, session['user_id'])
-        if access_type in access:
-            try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                collection_name = database.get_collection_name(collection_id)
-                new_paths = await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
-                database.add_log(
-                    'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
-                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=new_paths)
-                await index.delete_index(collection_id, collection_name, [request.path])
-            except Exception as error:
-                database.add_log('rename', 500, {
-                                 'error': str(error), 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
+    access_type = database.get_type_access(
+        collection_id, session['user_id'])
+    if access_type in access:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            collection_name = database.get_collection_name(collection_id)
+            new_paths = await minio.rename_file(collection_name, request.path, request.new_name, SseCustomerKey(collection_key), session['jwt_token'])
             database.add_log(
-                'rename', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+                'rename', 200, {'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=new_paths)
+            await index.delete_index(collection_id, collection_name, [request.path])
+        except Exception as error:
+            database.add_log('rename', 500, {
+                'error': str(error), 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
+        database.add_log(
+            'rename', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'new_name': request.new_name}, user_id=session['user_id'], collection_id=collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.post('/collections/{collection_id}/create_folder')  # access+
-async def create_folder(collection_id: int, request: NewFolderRequest):
+async def create_folder(collection_id: int, request: NewFolderRequest, session: dict = Depends(get_current_user)):
     access = [1, 2, 4]
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        access_type = database.get_type_access(
-            collection_id, session['user_id'])
-        if access_type in access:
-            try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['jwt_token'])
-                database.add_log(
-                    'create_folder', 200, {'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-            except Exception as error:
-                database.add_log('create_folder', 500, {
-                                 'error': str(error), 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
+    access_type = database.get_type_access(
+        collection_id, session['user_id'])
+    if access_type in access:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            await minio.new_folder(database.get_collection_name(collection_id), request.name, request.path, SseCustomerKey(collection_key), session['jwt_token'])
             database.add_log(
-                'create_folder', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+                'create_folder', 200, {'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+        except Exception as error:
+            database.add_log('create_folder', 500, {
+                'error': str(error), 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
+        database.add_log(
+            'create_folder', 403, {'error': f'{access_type} not in {access}', 'path': request.path, 'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
-@app.post('/collections/{collection_id}/upload/{token}/{path:path}')  # access+
-async def upload_file(file: UploadFile, collection_id: int, path: str, token: str) -> str | None:
+@app.post('/collections/{collection_id}/upload/{path:path}')  # access+
+async def upload_file(file: UploadFile, collection_id: int, path: str, session: dict = Depends(get_current_user)) -> str | None:
     access = [1, 2, 4]
-    token, hash2 = token[:32], token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        access_type = database.get_type_access(
-            collection_id, session['user_id'])
-        if access_type in access:
-            try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                collection_name = database.get_collection_name(collection_id)
-                await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
-                database.add_log(
-                    'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + ('/' + file.filename.strip('/')) if file.filename is not None else ''])
-                return file.filename
-            except Exception as error:
-                database.add_log('upload_file', 500, {
-                                 'error': str(error), 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
+    access_type = database.get_type_access(
+        collection_id, session['user_id'])
+    if access_type in access:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            collection_name = database.get_collection_name(collection_id)
+            await minio.upload_file(collection_name, file, path, SseCustomerKey(collection_key), session['jwt_token'], overwrite=access_type != 4)
             database.add_log(
-                'upload', 403, {'error': f'{access_type} not in {access}', 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+                'upload', 200, {'file_name': file.filename, 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=[path.strip('/') + ('/' + file.filename.strip('/')) if file.filename is not None else ''])
+            return file.filename
+        except Exception as error:
+            database.add_log('upload_file', 500, {
+                'error': str(error), 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
+        database.add_log(
+            'upload', 403, {'error': f'{access_type} not in {access}', 'path': path, 'file_name': file.filename}, user_id=session['user_id'], collection_id=collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.get('/session')  # safe+
-async def check_session(token: str) -> dict[str, int | bool]:
-    session = await sessions.get_session(token[:32])
-    if session:
-        username = database.get_username(session['user_id'])
-        if username:
-            await create_policy_to_user(username,
-                                        database.get_collections(session['user_id']))
-        return {'authenticated': True, 'user_id': session['user_id']}
-    raise HTTPException(status_code=401, detail='Token invalid')
+async def check_session(session: dict = Depends(get_current_user)) -> dict[str, int | bool]:
+    username = database.get_username(session['user_id'])
+    if username:
+        await create_policy_to_user(username, database.get_collections(session['user_id']))
+    return {'authenticated': True, 'user_id': session['user_id']}
 
 
 @app.delete('/session')  # safe+
@@ -478,536 +390,358 @@ async def delete_session(token: str) -> bool:
 
 
 @app.post('/create_collection')  # safe+ logs+
-async def create_collection(request: CreateCollectionRequest) -> int:
-    session = await sessions.get_session(request.token[:32])
-    if session:
-        try:
-            await minio.create_bucket(request.name, session['jwt_token'])
-            collection_id = database.create_collection(
-                request.name, session['user_id'])
-            database.add_log('create_collection', 200,
-                             {'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
-            username = database.get_username(session['user_id'])
-            if username:
-                await create_policy_to_user(username, database.get_collections(session['user_id']))
-        except HTTPException as error:
-            database.add_log('create_collection', error.status_code,
-                             {'error': error.detail, 'name': request.name}, user_id=session['user_id'])
-            raise error
-        return collection_id
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.post('/give_access_user_to_collection')  # safe+ access- logs+
-async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest):
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        try:
-            database.give_access_user_to_collection(
-                request.collection_id, session['user_id'], request.user_id, request.access_type_id, key)
-            database.add_log('give_access_user_to_collection',
-                             200, {'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
-            username = database.get_username(session['user_id'])
-            if username:
-                await create_policy_to_user(username,
-                                            database.get_collections(request.user_id))
-        except Exception as error:
-            database.add_log('give_access_user_to_collection',
-                             500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.post('/create_group')  # safe+ logs+
-async def create_group(request: CreateGroupRequest):
-    token = request.token[:32]
-    session = await sessions.get_session(token)
-    if session:
-        try:
-            group_id = database.create_group(
-                session['user_id'], request.title, request.description)
-            database.add_log(
-                'create_group', 200, {'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=group_id)
-        except Exception as error:
-            database.add_log('create_group', 500, {'error': str(
-                error), 'title': request.title, 'description': request.description}, user_id=session['user_id'])
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.post('/give_access_group_to_collection')  # safe+ access- logs+
-async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest):
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        try:
-            access_id = database.give_access_group_to_collection(
-                request.collection_id, session['user_id'], request.group_id, request.access_type_id, key)
-            database.add_log('give_access_group_to_collection',
-                             200, {'access_id': access_id}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
-            for user in database.get_group_users(request.group_id, session['user_id']):
-                await create_policy_to_user(
-                    user['username'], database.get_collections(user['id']))
-        except Exception as error:
-            database.add_log('give_access_group_to_collection',
-                             500, {'error': str(error)}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.post('/add_user_to_group')  # safe+ logs+
-async def add_user_to_group(request: AddUserToGroupRequest):
-    token, hash2 = request.token[:32], request.token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        hash2 = base64.urlsafe_b64decode(hash2.encode())
-        key = hash_reconstruct(session['hash1'], hash2)
-        try:
-            database.add_user_to_group(
-                request.group_id, session['user_id'], request.user_id, request.role_id, key)
-            database.add_log('add_user_to_group', 200,
-                             {'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
-            username = database.get_username(request.user_id)
-            if username:
-                await create_policy_to_user(username,
-                                            database.get_collections(request.user_id))
-        except Exception as error:
-            database.add_log('add_user_to_group', 500, {'error': str(
-                error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.get('/get_groups')  # safe+
-async def get_groups(token: str) -> list | None:
-    session = await sessions.get_session(token)
-    if session:
-        return database.get_groups(session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
-
-
-@app.delete('/remove_collection')  # safe+ logs+
-async def remove_collection(token: str, collection_id: int):
-    session = await sessions.get_session(token[:32])
-    if session:
-        collection_name = database.get_collection_name(collection_id)
-        try:
-            await minio.remove_bucket(database.get_collection_name(collection_id), session['jwt_token'])
-        except HTTPException as error:
-            database.add_log('remove_collection', error.status_code, {
-                             'error': error.detail, 'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
-            if error.status_code != 410:
-                raise error
-        database.remove_collection(collection_id, session['user_id'])
-        database.add_log('remove_collection', 200, {
-                         'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
+async def create_collection(request: CreateCollectionRequest, session: dict = Depends(get_current_user)) -> int:
+    try:
+        await minio.create_bucket(request.name, session['jwt_token'])
+        collection_id = database.create_collection(
+            request.name, session['user_id'])
+        database.add_log('create_collection', 200,
+                         {'name': request.name}, user_id=session['user_id'], collection_id=collection_id)
         username = database.get_username(session['user_id'])
         if username:
             await create_policy_to_user(username, database.get_collections(session['user_id']))
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+    except HTTPException as error:
+        database.add_log('create_collection', error.status_code,
+                         {'error': error.detail, 'name': request.name}, user_id=session['user_id'])
+        raise error
+    return collection_id
+
+
+@app.post('/give_access_user_to_collection')  # safe+ access- logs+
+async def give_access_user_to_collection(request: GiveAccessUserToCollectionRequest, session: dict = Depends(get_current_user)):
+    key = hash_reconstruct(session['hash1'], session['hash2'])
+    try:
+        database.give_access_user_to_collection(
+            request.collection_id, session['user_id'], request.user_id, request.access_type_id, key)
+        database.add_log('give_access_user_to_collection',
+                         200, {'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
+        username = database.get_username(session['user_id'])
+        if username:
+            await create_policy_to_user(username,
+                                        database.get_collections(request.user_id))
+    except Exception as error:
+        database.add_log('give_access_user_to_collection',
+                         500, {'error': str(error), 'access_type_id': request.access_type_id}, user_id=session['user_id'], collection_id=request.collection_id)
+        raise error
+
+
+@app.post('/create_group')  # safe+ logs+
+async def create_group(request: CreateGroupRequest, session: dict = Depends(get_current_user)):
+    try:
+        group_id = database.create_group(
+            session['user_id'], request.title, request.description)
+        database.add_log(
+            'create_group', 200, {'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=group_id)
+    except Exception as error:
+        database.add_log('create_group', 500, {'error': str(
+            error), 'title': request.title, 'description': request.description}, user_id=session['user_id'])
+        raise error
+
+
+@app.post('/give_access_group_to_collection')  # safe+ access- logs+
+async def give_access_group_to_collection(request: GiveAccessGroupToCollectionRequest, session: dict = Depends(get_current_user)):
+    key = hash_reconstruct(session['hash1'], session['hash2'])
+    try:
+        access_id = database.give_access_group_to_collection(
+            request.collection_id, session['user_id'], request.group_id, request.access_type_id, key)
+        database.add_log('give_access_group_to_collection',
+                         200, {'access_id': access_id}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
+        for user in database.get_group_users(request.group_id, session['user_id']):
+            await create_policy_to_user(
+                user['username'], database.get_collections(user['id']))
+    except Exception as error:
+        database.add_log('give_access_group_to_collection',
+                         500, {'error': str(error)}, user_id=session['user_id'], group_id=request.group_id, collection_id=request.collection_id)
+        raise error
+
+
+@app.post('/add_user_to_group')  # safe+ logs+
+async def add_user_to_group(request: AddUserToGroupRequest, session: dict = Depends(get_current_user)):
+    key = hash_reconstruct(session['hash1'], session['hash2'])
+    try:
+        database.add_user_to_group(
+            request.group_id, session['user_id'], request.user_id, request.role_id, key)
+        database.add_log('add_user_to_group', 200,
+                         {'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
+        username = database.get_username(request.user_id)
+        if username:
+            await create_policy_to_user(username,
+                                        database.get_collections(request.user_id))
+    except Exception as error:
+        database.add_log('add_user_to_group', 500, {'error': str(
+            error), 'role_id': request.role_id, 'user_id': request.user_id}, user_id=session['user_id'], group_id=request.group_id)
+        raise error
+
+
+@app.get('/get_groups')  # safe+
+async def get_groups(session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_groups(session['user_id'])
+
+
+@app.delete('/remove_collection')  # safe+ logs+
+async def remove_collection(collection_id: int, session: dict = Depends(get_current_user)):
+    collection_name = database.get_collection_name(collection_id)
+    try:
+        await minio.remove_bucket(database.get_collection_name(collection_id), session['jwt_token'])
+    except HTTPException as error:
+        database.add_log('remove_collection', error.status_code, {
+                         'error': error.detail, 'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
+        if error.status_code != 410:
+            raise error
+    database.remove_collection(collection_id, session['user_id'])
+    database.add_log('remove_collection', 200, {
+                     'collection_id': collection_id, 'collection_name': collection_name}, user_id=session['user_id'])
+    username = database.get_username(session['user_id'])
+    if username:
+        await create_policy_to_user(username, database.get_collections(session['user_id']))
 
 
 @app.get('/get_other_users')  # safe+
-async def get_other_users(token: str) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_other_users(session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_other_users(session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_other_users(session['user_id'])
 
 
 @app.get('/get_access_to_collection')  # safe+
-async def get_access_to_collection(token: str, collection_id: int) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_access_to_collection(collection_id, session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_access_to_collection(collection_id: int, session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_access_to_collection(collection_id, session['user_id'])
 
 
 @app.delete('/delete_access_to_collection')  # safe+ logs+
-async def delete_access_to_collection(token: str, access_id: int) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            access_info = database.get_access_info(access_id)
-            database.delete_access_to_collection(access_id, session['user_id'])
-            database.add_log('delete_access_to_collection', 200, {
-                             'access_id': access_id}, user_id=session['user_id'])
-            if access_info['user_id'] is not None:
-                username = database.get_username(access_info['user_id'])
-                if username:
-                    await create_policy_to_user(username,
-                                                database.get_collections(access_info['user_id']))
-            elif access_info['group_id'] is not None:
-                for user in database.get_group_users(access_info['group_id'], session['user_id']):
-                    await create_policy_to_user(
-                        user['username'], database.get_collections(user['id']))
-        except Exception as error:
-            database.add_log('delete_access_to_collection', 500, {
-                             'error': str(error), 'access_id': access_id}, user_id=session['user_id'])
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def delete_access_to_collection(access_id: int, session: dict = Depends(get_current_user)) -> list | None:
+    try:
+        access_info = database.get_access_info(access_id)
+        database.delete_access_to_collection(access_id, session['user_id'])
+        database.add_log('delete_access_to_collection', 200, {
+                         'access_id': access_id}, user_id=session['user_id'])
+        if access_info['user_id'] is not None:
+            username = database.get_username(access_info['user_id'])
+            if username:
+                await create_policy_to_user(username,
+                                            database.get_collections(access_info['user_id']))
+        elif access_info['group_id'] is not None:
+            for user in database.get_group_users(access_info['group_id'], session['user_id']):
+                await create_policy_to_user(
+                    user['username'], database.get_collections(user['id']))
+    except Exception as error:
+        database.add_log('delete_access_to_collection', 500, {
+                         'error': str(error), 'access_id': access_id}, user_id=session['user_id'])
+        raise error
 
 
 @app.delete('/delete_user_to_group')  # safe+ logs+
-async def delete_user_to_group(token: str, group_id: int, user_id: int) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            database.delete_user_to_group(group_id, user_id, session['user_id'])
-            database.add_log('delete_user_to_group', 200, {
-                             'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
-            username = database.get_username(user_id)
-            if username:
-                await create_policy_to_user(username, database.get_collections(user_id))
-        except Exception as error:
-            database.add_log('delete_user_to_group', 500, {'error': str(
-                error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def delete_user_to_group(group_id: int, user_id: int, session: dict = Depends(get_current_user)) -> list | None:
+    try:
+        database.delete_user_to_group(
+            group_id, user_id, session['user_id'])
+        database.add_log('delete_user_to_group', 200, {
+                         'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
+        username = database.get_username(user_id)
+        if username:
+            await create_policy_to_user(username, database.get_collections(user_id))
+    except Exception as error:
+        database.add_log('delete_user_to_group', 500, {'error': str(
+            error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
+        raise error
 
 
 @app.get('/get_group_users')  # safe+
-async def get_group_users(token: str, group_id: int) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_group_users(group_id, session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_group_users(group_id: int, session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_group_users(group_id, session['user_id'])
 
 
 @app.get('/get_access_types')  # safe+
-async def get_access_types(token: str) -> list | None:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_access_types()
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_access_types(session: dict = Depends(get_current_user)) -> list | None:
+    return database.get_access_types()
 
 
 @app.post('/transfer_power_to_group')  # safe+
-async def transfer_power_to_group(token: str, group_id: int, user_id: int):
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            database.transfer_power_to_group(group_id, session['user_id'], user_id)
-            database.add_log('transfer_power_to_group', 200, {
-                             'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
-        except Exception as error:
-            database.add_log('transfer_power_to_group', 500, {'error': str(
-                error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def transfer_power_to_group(group_id: int, user_id: int, session: dict = Depends(get_current_user)):
+    try:
+        database.transfer_power_to_group(
+            group_id, session['user_id'], user_id)
+        database.add_log('transfer_power_to_group', 200, {
+            'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
+    except Exception as error:
+        database.add_log('transfer_power_to_group', 500, {'error': str(
+            error), 'user_id': user_id}, user_id=session['user_id'], group_id=group_id)
+        raise error
 
 
 @app.delete('/exit_group')  # safe+ logs+
-async def exit_group(token: str, group_id: int):
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            database.delete_user_to_group(group_id, session['user_id'], session['user_id'])
-            database.add_log('exit_group', 200, {},
-                             user_id=session['user_id'], group_id=group_id)
-            username = database.get_username(session['user_id'])
-            if username:
-                await create_policy_to_user(username, database.get_collections(session['user_id']))
-        except Exception as error:
-            database.add_log('exit_group', 500, {'error': str(error)},
-                             user_id=session['user_id'], group_id=group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def exit_group(group_id: int, session: dict = Depends(get_current_user)):
+    try:
+        database.delete_user_to_group(
+            group_id, session['user_id'], session['user_id'])
+        database.add_log('exit_group', 200, {},
+                         user_id=session['user_id'], group_id=group_id)
+        username = database.get_username(session['user_id'])
+        if username:
+            await create_policy_to_user(username, database.get_collections(session['user_id']))
+    except Exception as error:
+        database.add_log('exit_group', 500, {'error': str(error)},
+                         user_id=session['user_id'], group_id=group_id)
+        raise error
 
 
 @app.post('/change_role_in_group')  # safe+ logs+
-async def change_role_in_group(token: str, group_id: int, user_id: int, role_id: int):
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            database.change_role_in_group(
-                group_id, session['user_id'], user_id, role_id)
-            database.add_log('change_role_in_group', 200, {'user_id': user_id, 'role_id': role_id},
-                             user_id=session['user_id'], group_id=group_id)
-        except Exception as error:
-            database.add_log('change_role_in_group', 500, {'error': str(error), 'user_id': user_id, 'role_id': role_id},
-                             user_id=session['user_id'], group_id=group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def change_role_in_group(group_id: int, user_id: int, role_id: int, session: dict = Depends(get_current_user)):
+    try:
+        database.change_role_in_group(
+            group_id, session['user_id'], user_id, role_id)
+        database.add_log('change_role_in_group', 200, {'user_id': user_id, 'role_id': role_id},
+                         user_id=session['user_id'], group_id=group_id)
+    except Exception as error:
+        database.add_log('change_role_in_group', 500, {'error': str(error), 'user_id': user_id, 'role_id': role_id},
+                         user_id=session['user_id'], group_id=group_id)
+        raise error
 
 
 @app.get('/get_user_info')  # safe+
-async def get_user_info(token: str) -> dict[str, int | str]:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_user_info(session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_user_info(session: dict = Depends(get_current_user)) -> dict[str, int | str]:
+    return database.get_user_info(session['user_id'])
 
 
 @app.post('/change_access_type')  # safe+ logs+
-async def change_access_type(token: str, access_id: int, access_type_id: int):
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            database.change_access_type(access_id, session['user_id'], access_type_id)
-            database.add_log('change_access_type', 200, {'access_id': access_id, 'access_type_id': access_type_id},
-                             user_id=session['user_id'])
-            access_info = database.get_access_info(access_id)
-            if access_info['user_id'] is not None:
-                username = database.get_username(access_info['user_id'])
-                if username:
-                    await create_policy_to_user(username, database.get_collections(access_info['user_id']))
-            elif access_info['group_id'] is not None:
-                for user in database.get_group_users(access_info['group_id'], session['user_id']):
-                    await create_policy_to_user(
-                        user['username'], database.get_collections(user['id']))
-        except Exception as error:
-            database.add_log('change_access_type', 500, {'error': str(
-                error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=session['user_id'])
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def change_access_type(access_id: int, access_type_id: int, session: dict = Depends(get_current_user)):
+    try:
+        database.change_access_type(
+            access_id, session['user_id'], access_type_id)
+        database.add_log('change_access_type', 200, {'access_id': access_id, 'access_type_id': access_type_id},
+                         user_id=session['user_id'])
+        access_info = database.get_access_info(access_id)
+        if access_info['user_id'] is not None:
+            username = database.get_username(access_info['user_id'])
+            if username:
+                await create_policy_to_user(username, database.get_collections(access_info['user_id']))
+        elif access_info['group_id'] is not None:
+            for user in database.get_group_users(access_info['group_id'], session['user_id']):
+                await create_policy_to_user(
+                    user['username'], database.get_collections(user['id']))
+    except Exception as error:
+        database.add_log('change_access_type', 500, {'error': str(
+            error), 'access_id': access_id, 'access_type_id': access_type_id}, user_id=session['user_id'])
+        raise error
 
 
 @app.post('/change_group_info')  # safe+ logs+
-async def change_group_info(request: ChangeGroupInfoRequest):
-    session = await sessions.get_session(request.token[:32])
-    if session:
-        try:
-            database.change_group_info(
-                session['user_id'], request.group_id, request.title, request.description)
-            database.add_log('change_group_info', 200, {'title': request.title, 'description': request.description},
-                             user_id=session['user_id'], group_id=request.group_id)
-        except Exception as error:
-            database.add_log('change_group_info', 500, {'error': str(
-                error), 'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=request.group_id)
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def change_group_info(request: ChangeGroupInfoRequest, session: dict = Depends(get_current_user)):
+    try:
+        database.change_group_info(
+            session['user_id'], request.group_id, request.title, request.description)
+        database.add_log('change_group_info', 200, {'title': request.title, 'description': request.description},
+                         user_id=session['user_id'], group_id=request.group_id)
+    except Exception as error:
+        database.add_log('change_group_info', 500, {'error': str(
+            error), 'title': request.title, 'description': request.description}, user_id=session['user_id'], group_id=request.group_id)
+        raise error
 
 
 @app.get('/get_logs')  # safe+
-async def get_logs(token: str) -> list:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_logs(session['user_id'])
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_logs(session: dict = Depends(get_current_user)) -> list:
+    return database.get_logs(session['user_id'])
 
 
 @app.get('/get_history_collection')  # safe+
-async def get_history_collection(token: str, collection_id: int) -> list:
-    session = await sessions.get_session(token[:32])
-    if session:
-        return database.get_history_collection(session['user_id'], collection_id)
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def get_history_collection(collection_id: int, session: dict = Depends(get_current_user)) -> list:
+    return database.get_history_collection(session['user_id'], collection_id)
 
 
 @app.post('/change_collection_info')  # safe+ logs+
-async def change_collection_info(token: str, collection_id: int, data: dict):
+async def change_collection_info(collection_id: int, data: dict, session: dict = Depends(get_current_user)):
     access = [1]
-    session = await sessions.get_session(token[:32])
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                data['collection_id'] = collection_id
-                data['collection_name'] = database.get_collection_name(
-                    collection_id)
-                await opensearch.update_document(collection_id, data)
-                database.add_log('change_collection_info', 200, None,
-                                 user_id=session['user_id'], collection_id=collection_id)
-            except Exception as error:
-                database.add_log('change_collection_info', 500, {'error': str(
-                    error), 'data': data}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='You not owner'
-            )
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            data['collection_id'] = collection_id
+            data['collection_name'] = database.get_collection_name(
+                collection_id)
+            await opensearch.update_document(collection_id, data)
+            database.add_log('change_collection_info', 200, None,
+                             user_id=session['user_id'], collection_id=collection_id)
+        except Exception as error:
+            database.add_log('change_collection_info', 500, {'error': str(
+                error), 'data': data}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='You not owner'
         )
 
 
 @app.get('/get_collection_info')  # safe+ logs+
-async def get_collection_info(token: str, collection_id: int):
+async def get_collection_info(collection_id: int, session: dict = Depends(get_current_user)) -> dict | None:
     access = [1, 2, 3, 4]
-    session = await sessions.get_session(token[:32])
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                return await opensearch.get_document(collection_id)
-            except Exception as error:
-                database.add_log('get_collection_info', 500, {'error': str(
-                    error)}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            return await opensearch.get_document(collection_id)
+        except Exception as error:
+            database.add_log('get_collection_info', 500, {'error': str(
+                error)}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 # safe+ logs+
-@app.get('/collections/{collection_id}/file_info/{token}/{path:path}')
-async def get_file_info(token: str, collection_id: int, path: str, is_dir: bool):
+@app.get('/collections/{collection_id}/file_info/{path:path}')
+async def get_file_info(collection_id: int, path: str, is_dir: bool, session: dict = Depends(get_current_user)) -> dict | None:
     access = [1, 2, 3, 4]
-    session = await sessions.get_session(token[:32])
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                if is_dir:
-                    return await minio.get_dir_info(database.get_collection_name(collection_id), path, session['jwt_token'])
-                else:
-                    return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.opensearch_files_index)
-            except Exception as error:
-                database.add_log('get_file_info', 500, {'error': str(
-                    error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            if is_dir:
+                return await minio.get_dir_info(database.get_collection_name(collection_id), path, session['jwt_token'])
+            else:
+                return await opensearch.get_document(f'{collection_id}/{path.strip('/')}', config.opensearch_files_index)
+        except Exception as error:
+            database.add_log('get_file_info', 500, {'error': str(
+                error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.get('/search_collections')  # safe+ logs+
-async def search_collection(text: str, token: str) -> list:
-    session = await sessions.get_session(token[:32])
-    if session:
-        try:
-            collections_result = []
-            documents = await opensearch.search_collections(text, jwt_token=session['jwt_token'])
-            collections = database.get_collections(
-                session['user_id'], accessed_to_all=True)
-            for document in documents['collections']:
+async def search_collection(text: str, session: dict = Depends(get_current_user)) -> list:
+    try:
+        collections_result = []
+        documents = await opensearch.search_collections(text, jwt_token=session['jwt_token'])
+        collections = database.get_collections(
+            session['user_id'], accessed_to_all=True)
+        for document in documents['collections']:
+            collection = list(
+                filter(lambda x: x['id'] == int(document['_id']), collections))
+            if len(collection) > 0:
+                collection[0]['index'] = document['_source']
+                collection[0]['files'] = [
+                    x['_source']
+                    for x in documents['files']
+                    if x['_source']['collection_id'] == int(document['_id'])
+                ]
+                collections_result.append(collection[0])
+        for file in documents['files']:
+            collection = list(filter(
+                lambda x: x['id'] == file['_source']['collection_id'], collections_result))
+            if len(collection) == 0:
                 collection = list(
-                    filter(lambda x: x['id'] == int(document['_id']), collections))
+                    filter(lambda x: x['id'] == file['_source']['collection_id'], collections))
                 if len(collection) > 0:
-                    collection[0]['index'] = document['_source']
                     collection[0]['files'] = [
                         x['_source']
                         for x in documents['files']
-                        if x['_source']['collection_id'] == int(document['_id'])
+                        if x['_source']['collection_id'] == file['_source']['collection_id']
                     ]
                     collections_result.append(collection[0])
-            for file in documents['files']:
-                collection = list(filter(
-                    lambda x: x['id'] == file['_source']['collection_id'], collections_result))
-                if len(collection) == 0:
-                    collection = list(
-                        filter(lambda x: x['id'] == file['_source']['collection_id'], collections))
-                    if len(collection) > 0:
-                        collection[0]['files'] = [
-                            x['_source']
-                            for x in documents['files']
-                            if x['_source']['collection_id'] == file['_source']['collection_id']
-                        ]
-                        collections_result.append(collection[0])
-            return collections_result
-        except Exception as error:
-            database.add_log('search_collection_info', 500, {'error': str(
-                error), 'text': text}, user_id=session['user_id'])
-            raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+        return collections_result
+    except Exception as error:
+        database.add_log('search_collection_info', 500, {'error': str(
+            error), 'text': text}, user_id=session['user_id'])
+        raise error
 
 
 # @app.get('/search_collection_files')  # safe+ logs+
@@ -1036,62 +770,44 @@ async def search_collection(text: str, token: str) -> list:
 
 
 @app.post('/change_access_to_all')  # safe+ logs+
-async def change_access_to_all(token: str, collection_id: int, is_access: bool):
-    token, hash2 = token[:32], token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) == 1:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            try:
-                database.change_access_to_all(
-                    session['user_id'], collection_id, is_access, key)
-                database.add_log('change_access_to_all', 200, {'is_access': is_access},
-                                 user_id=session['user_id'], collection_id=collection_id)
-                await create_policy_to_all(
-                    database.get_absolute_access_to_all_collections())
-            except Exception as error:
-                database.add_log('change_access_to_all', 500, {'error': str(
-                    error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
-        )
+async def change_access_to_all(collection_id: int, is_access: bool, session: dict = Depends(get_current_user)):
+    if database.get_type_access(collection_id, session['user_id']) == 1:
+        key = hash_reconstruct(session['hash1'], session['hash2'])
+        try:
+            database.change_access_to_all(
+                session['user_id'], collection_id, is_access, key)
+            database.add_log('change_access_to_all', 200, {'is_access': is_access},
+                             user_id=session['user_id'], collection_id=collection_id)
+            await create_policy_to_all(
+                database.get_absolute_access_to_all_collections())
+        except Exception as error:
+            database.add_log('change_access_to_all', 500, {'error': str(
+                error), 'is_access': is_access}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
 
 
-@app.post('/collections/{collection_id}/indexing_file/{token}/{path:path}')
-async def indexing_file(token: str, collection_id: int, path: str):
+@app.post('/collections/{collection_id}/indexing_file/{path:path}')
+async def indexing_file(collection_id: int, path: str, session: dict = Depends(get_current_user)):
     access = [1, 2, 3, 4]
-    token, hash2 = token[:32], token[32:]
-    session = await sessions.get_session(token)
-    if session:
-        access_type = database.get_type_access(
-            collection_id, session['user_id'])
-        if access_type in access:
-            hash2 = base64.urlsafe_b64decode(hash2.encode())
-            key = hash_reconstruct(session['hash1'], hash2)
-            try:
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                collection_name = database.get_collection_name(collection_id)
-                await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=['/' + path.strip('/')])
-                database.add_log(
-                    'indexing_file', 200, {'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            except Exception as error:
-                database.add_log('indexing_file', 500, {'error': str(
-                    error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
+    access_type = database.get_type_access(
+        collection_id, session['user_id'])
+    if access_type in access:
+        key = hash_reconstruct(session['hash1'], session['hash2'])
+        try:
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            collection_name = database.get_collection_name(collection_id)
+            await index.indexing_files(collection_id, collection_name, jwt_token=session['jwt_token'], encryption_key=collection_key, files=['/' + path.strip('/')])
             database.add_log(
-                'index_file', 403, {'error': f'{access_type} not in {access}', 'path': path}, user_id=session['user_id'], collection_id=collection_id)
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
+                'indexing_file', 200, {'path': path}, user_id=session['user_id'], collection_id=collection_id)
+        except Exception as error:
+            database.add_log('indexing_file', 500, {'error': str(
+                error), 'path': path}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
     else:
+        database.add_log(
+            'index_file', 403, {'error': f'{access_type} not in {access}', 'path': path}, user_id=session['user_id'], collection_id=collection_id)
         raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
+            status_code=403,
+            detail='No access'
         )
