@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import DATETIME, VARCHAR, Column, BINARY, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
+from sqlalchemy import DateTime, VARCHAR, Column, LargeBinary, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
@@ -16,9 +16,9 @@ class User(Base):
     __tablename__ = 'users'
 
     id = Column(INT, primary_key=True, autoincrement=True)
-    login = Column(VARCHAR(25), nullable=False)
-    encrypted_private_key = Column(BINARY(48), nullable=False)
-    public_key = Column(BINARY(32), nullable=False)
+    username = Column(VARCHAR(25), nullable=False)
+    encrypted_private_key = Column(LargeBinary(48), nullable=False)
+    public_key = Column(LargeBinary(32), nullable=False)
 
 
 class Group(Base):
@@ -27,7 +27,7 @@ class Group(Base):
     id = Column(INT, primary_key=True, autoincrement=True)
     title = Column(VARCHAR(255), nullable=False)
     description = Column(TEXT, nullable=False)
-    public_key = Column(BINARY(32), nullable=False)
+    public_key = Column(LargeBinary(32), nullable=False)
 
 
 class UserRole(Base):
@@ -43,7 +43,7 @@ class GroupUser(Base):
     user_id = Column(ForeignKey(User.id), primary_key=True)
     group_id = Column(ForeignKey(Group.id), primary_key=True)
     role_id = Column(ForeignKey(UserRole.id), nullable=False)
-    encrypted_private_key = Column(BINARY(92), nullable=False)
+    encrypted_private_key = Column(LargeBinary(92), nullable=False)
 
 
 class AccessType(Base):
@@ -58,7 +58,7 @@ class Collection(Base):
 
     id = Column(INT, primary_key=True, autoincrement=True)
     name = Column(VARCHAR(63), nullable=False, unique=True)
-    encrypt_key = Column(BINARY(32), nullable=True)
+    encrypt_key = Column(LargeBinary(32), nullable=True)
 
 
 class AccessToCollection(Base):
@@ -66,7 +66,7 @@ class AccessToCollection(Base):
 
     id = Column(INT, primary_key=True, autoincrement=True)
     collection_id = Column(ForeignKey(Collection.id), nullable=False)
-    encrypted_key = Column(BINARY(92), nullable=False)
+    encrypted_key = Column(LargeBinary(92), nullable=False)
     type_id = Column(ForeignKey(AccessType.id), nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=True)
     group_id = Column(ForeignKey(Group.id), nullable=True)
@@ -83,7 +83,7 @@ class Log(Base):
     __tablename__ = 'logs'
 
     id = Column(INT, primary_key=True, autoincrement=True)
-    date_time = Column(DATETIME, nullable=False)
+    date_time = Column(DateTime, nullable=False)
     action = Column(VARCHAR(255), nullable=False)
     message = Column(TEXT, nullable=True)
     result = Column(INT, nullable=False)
@@ -114,7 +114,7 @@ def insert_initial_user_roles(target, connection, **kw):
 class MainDatabase:
     def __init__(self):
         self.engine = create_engine(
-            f'mariadb+pymysql://{config.db_user}:{config.db_password}@localhost/main?charset=utf8mb4',
+            f'postgresql+psycopg2://{config.db_user}:{config.db_password}@localhost/{config.main_db_name}',
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=10,
@@ -124,7 +124,7 @@ class MainDatabase:
         self.connection = self.engine.connect()
         Base.metadata.create_all(self.engine)
 
-    def add_user(self, login: str, password: str):
+    def add_user(self, username: str, password: str):
         private_key, public_key = crypt.random_key_pair()
         hash_password = crypt.hash_argon2_from_password(password)
         encrypted_private_key = crypt.sym_encrypt_key(
@@ -132,7 +132,7 @@ class MainDatabase:
 
         with Session(self.engine) as session:
             query = insert(User).values(
-                login=login, encrypted_private_key=encrypted_private_key, public_key=public_key).returning(User.id)
+                username=username, encrypted_private_key=encrypted_private_key, public_key=public_key).returning(User.id)
             user_id = session.execute(query).scalar_one()
             session.commit()
             return user_id
@@ -226,15 +226,15 @@ class MainDatabase:
                 encrypted_private_key, user_private_key)
             return group_private_key
 
-    def get_user_id(self, login: str) -> int | None:
+    def get_user_id(self, username: str) -> int | None:
         with Session(self.engine) as session:
-            query = select(User.id).where(User.login == login)
+            query = select(User.id).where(User.username == username)
             user_id = session.execute(query).scalar()
             return user_id
 
     def get_username(self, user_id: int) -> str | None:
         with Session(self.engine) as session:
-            query = select(User.login).where(User.id == user_id)
+            query = select(User.username).where(User.id == user_id)
             username = session.execute(query).scalar()
             return username
 
@@ -464,7 +464,7 @@ class MainDatabase:
 
     def get_other_users(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(User.id, User.login).where(User.id != user_id)
+            query = select(User.id, User.username).where(User.id != user_id)
             result = session.execute(query).all()
             users = []
             for user in result:
@@ -476,7 +476,7 @@ class MainDatabase:
             query = select(
                 AccessToCollection.id,
                 AccessToCollection.user_id,
-                User.login,
+                User.username,
                 AccessToCollection.group_id,
                 Group.title,
                 AccessToCollection.type_id,
@@ -524,7 +524,7 @@ class MainDatabase:
 
     def get_group_users(self, group_id: int, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(GroupUser.user_id, User.login, GroupUser.role_id).where(
+            query = select(GroupUser.user_id, User.username, GroupUser.role_id).where(
                 (GroupUser.group_id == group_id) &
                 (GroupUser.group_id).in_(
                     select(GroupUser.group_id).where(
@@ -628,12 +628,12 @@ class MainDatabase:
 
     def get_user_info(self, user_id: int):
         with Session(self.engine) as session:
-            query = select(User.id, User.login).where(User.id == user_id)
+            query = select(User.id, User.username).where(User.id == user_id)
             user = session.execute(query).one()
             query = select(func.count('*')).select_from(AccessToCollection).where(
                 (AccessToCollection.user_id == user_id) & (AccessToCollection.type_id == 1))
             count_collections = session.execute(query).scalar_one()
-            result = {'id': user.id, 'username': user.login,
+            result = {'id': user.id, 'username': user.username,
                       'count_collections': count_collections}
             return result
 
@@ -693,7 +693,7 @@ class MainDatabase:
     def get_history_collection(self, user_id: int, collection_id: int) -> list:
         with Session(self.engine) as session:
             query = select(
-                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id, User.login,
+                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id, User.username,
             ).where(
                 (Log.collection_id == collection_id) &
                 (Log.collection_id.in_(

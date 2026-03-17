@@ -3,8 +3,7 @@ minio
 cryptography
 argon2-cffi
 SQLAlchemy
-pymysql
-asyncmy
+psycopg2-binary
 ldap3
 requests
 zipstream

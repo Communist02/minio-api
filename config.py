@@ -8,6 +8,7 @@ opensearch_host = "elastic-1.eco.dvo.ru"
 opensearch_port = 9200
 opensearch_collections_index = "collections"
 opensearch_files_index = "collections-files"
+main_db_name = "main"
 db_user = "root"
 db_password = "root"
 opensearch_user = "admin"
