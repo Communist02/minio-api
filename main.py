@@ -10,12 +10,11 @@ from urllib.parse import quote
 import index
 from minio_client import MinIOClient
 from policy import create_policy_to_all, create_policy_to_user
-import sessions
 from database import MainDatabase
 from crypt import hash_reconstruct
 import config
 from opensearch import OpenSearchManager
-from validate import get_current_user
+from validate import get_current_user, validate_token
 
 
 class CopyRequest(BaseModel):
@@ -130,7 +129,7 @@ async def get_list_files(collection_id: int, path: str, recursive: bool = True, 
 async def get_file(collection_id: int, path: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
     access = [1, 2, 3]
     token, hash2 = token[:32], token[32:]
-    session = await sessions.get_session(token)
+    session = await validate_token(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
@@ -184,7 +183,7 @@ async def get_files(collection_id: int, files: str, session: dict = Depends(get_
 async def get_list_files_http(collection_id: int, token: str, request: Request, path: str = ''):
     access = [1, 2, 3]
     hash2 = token[32:]
-    session = await sessions.get_session(token[:32])
+    session = await validate_token(token[:32])
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             if path:
@@ -369,24 +368,6 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, session: 
             status_code=403,
             detail='No access'
         )
-
-
-@app.get('/session')  # safe+
-async def check_session(session: dict = Depends(get_current_user)) -> dict[str, int | bool]:
-    username = database.get_username(session['user_id'])
-    if username:
-        await create_policy_to_user(username, database.get_collections(session['user_id']))
-    return {'authenticated': True, 'user_id': session['user_id']}
-
-
-@app.delete('/session')  # safe+
-async def delete_session(token: str) -> bool:
-    session = await sessions.get_session(token[:32])
-    if session:
-        await sessions.delete_session(token[:32])
-        return True
-    else:
-        return False
 
 
 @app.post('/create_collection')  # safe+ logs+

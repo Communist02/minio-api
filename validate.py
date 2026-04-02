@@ -1,6 +1,9 @@
+import base64
+
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-import sessions
+import httpx
+import config
 
 security = HTTPBearer()
 
@@ -10,7 +13,19 @@ async def validate_token(token: str) -> dict | None:
     Проверяет токен через сервис авторизации.
     Возвращает данные пользователя или None.
     """
-    return await sessions.get_session(token)
+    async with httpx.AsyncClient(verify=not config.debug_mode) as client:
+        response = await client.get(
+            f'{config.auth_api_url}/introspect',
+            headers={'Authorization': f'Beaver {token[:32]}'},
+        )
+    if response.status_code == 200:
+        session = response.json()
+        if session['active'] == True:
+            session['hash1'] = base64.urlsafe_b64decode(
+                session['hash1'].encode())
+            session['hash2'] = base64.urlsafe_b64decode(token[32:].encode())
+            session['jwt_token'] = session['jwt']
+            return session
 
 
 async def get_current_user(
