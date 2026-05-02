@@ -1,4 +1,5 @@
 import json
+from fastapi import HTTPException
 import httpcore
 from httpx_aws_auth import AwsSigV4Auth, AwsCredentials
 import httpx
@@ -95,8 +96,12 @@ async def create_policy_to_user(username: str, collections: list) -> str:
             timeout=5
         )
     if response.status_code != 200:
-        print('Ошибка создания политики:', response.status_code)
-        print(response.text)
+        # print('Ошибка создания политики:', response.status_code)
+        # print(response.text)
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f'Ошибка создания политики: {response.text}'
+        )
 
     opensearch_policy['index_permissions'][0]['dls'] = str(
         opensearch_policy['index_permissions'][0]['dls']).replace("'", '"')
