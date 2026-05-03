@@ -12,7 +12,7 @@ from database import MainDatabase
 from crypt import hash_reconstruct
 import config
 from opensearch import OpenSearchManager
-from validate import get_current_user
+from validate import get_current_user, validate_token
 
 
 class CopyRequest(BaseModel):
@@ -124,35 +124,43 @@ async def get_list_files(collection_id: int, path: str, recursive: bool = True, 
 
 
 @app.get('/collections/{collection_id}/file/{path:path}')  # access+
-async def get_file(collection_id: int, path: str, request: Request, preview: bool = False, session: dict = Depends(get_current_user)) -> StreamingResponse:
-    access = [1, 2, 3]
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            try:
-                key = hash_reconstruct(session['hash1'], session['hash2'])
-                collection_key = database.get_collection_key(
-                    collection_id, session['user_id'], key)
-                path = path.strip('/')
-                range_header = request.headers.get('Range')
-                return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
-            except Exception as error:
-                database.add_log('get_file', 500,
-                                 {'error': str(error), 'path': path, 'preview': preview}, user_id=session['user_id'], collection_id=collection_id)
-                raise error
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
-    else:
+async def get_file(collection_id: int, path: str, request: Request, token: str, preview: bool = False) -> StreamingResponse:
+    session = await validate_token(token)
+    if not session:
         raise HTTPException(
             status_code=401,
-            detail='Token invalid'
+            detail='Token is invalid or expired'
+        )
+
+    access = [1, 2, 3]
+    if database.get_type_access(collection_id, session['user_id']) in access:
+        try:
+            key = hash_reconstruct(session['hash1'], session['hash2'])
+            collection_key = database.get_collection_key(
+                collection_id, session['user_id'], key)
+            path = path.strip('/')
+            range_header = request.headers.get('Range')
+            return await minio.download_file(database.get_collection_name(collection_id), path, preview, SseCustomerKey(collection_key), session['jwt_token'], range_header=range_header)
+        except Exception as error:
+            database.add_log('get_file', 500,
+                             {'error': str(error), 'path': path, 'preview': preview}, user_id=session['user_id'], collection_id=collection_id)
+            raise error
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail='No access'
         )
 
 
 @app.get('/collections/{collection_id}/archive')  # access+
-async def get_files(collection_id: int, files: str, session: dict = Depends(get_current_user)) -> StreamingResponse:
+async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
+    session = await validate_token(token)
+    if not session:
+        raise HTTPException(
+            status_code=401,
+            detail='Token is invalid or expired'
+        )
+
     access = [1, 2, 3]
     if database.get_type_access(collection_id, session['user_id']) in access:
         try:
