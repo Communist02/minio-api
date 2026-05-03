@@ -1,20 +1,18 @@
-import base64
 from contextlib import asynccontextmanager
 import httpx
 from minio.sse import SseCustomerKey
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from urllib.parse import quote
 import index
-from minio_client import MinIOClient
+from s3_client import S3Client
 from policy import create_policy_to_all, create_policy_to_user
 from database import MainDatabase
 from crypt import hash_reconstruct
 import config
 from opensearch import OpenSearchManager
-from validate import get_current_user, validate_token
+from validate import get_current_user
 
 
 class CopyRequest(BaseModel):
@@ -73,7 +71,7 @@ class SpecificListCollectionsRequest(BaseModel):
 
 database = MainDatabase()
 opensearch = OpenSearchManager()
-minio = MinIOClient(config.s3_url)
+minio = S3Client(config.s3_url)
 
 
 @asynccontextmanager
@@ -125,16 +123,13 @@ async def get_list_files(collection_id: int, path: str, recursive: bool = True, 
         )
 
 
-@app.get('/collections/{collection_id}/file/{token}/{path:path}')  # access+
-async def get_file(collection_id: int, path: str, token: str, request: Request, preview: bool = False) -> StreamingResponse:
+@app.get('/collections/{collection_id}/file/{path:path}')  # access+
+async def get_file(collection_id: int, path: str, request: Request, preview: bool = False, session: dict = Depends(get_current_user)) -> StreamingResponse:
     access = [1, 2, 3]
-    token, hash2 = token[:32], token[32:]
-    session = await validate_token(token)
     if session:
         if database.get_type_access(collection_id, session['user_id']) in access:
             try:
-                hash2 = base64.urlsafe_b64decode(hash2.encode())
-                key = hash_reconstruct(session['hash1'], hash2)
+                key = hash_reconstruct(session['hash1'], session['hash2'])
                 collection_key = database.get_collection_key(
                     collection_id, session['user_id'], key)
                 path = path.strip('/')
@@ -173,59 +168,6 @@ async def get_files(collection_id: int, files: str, session: dict = Depends(get_
         raise HTTPException(
             status_code=403,
             detail='No access'
-        )
-
-
-# access+
-@app.get('/collections/{collection_id}/files/{token}', response_class=HTMLResponse)
-@app.get('/collections/{collection_id}/files/{token}/{path:path}', response_class=HTMLResponse)
-@app.head('/collections/{collection_id}/files/{token}/{path:path}')
-async def get_list_files_http(collection_id: int, token: str, request: Request, path: str = ''):
-    access = [1, 2, 3]
-    hash2 = token[32:]
-    session = await validate_token(token[:32])
-    if session:
-        if database.get_type_access(collection_id, session['user_id']) in access:
-            if path:
-                try:
-                    if not path.endswith('/'):
-                        hash2 = base64.urlsafe_b64decode(hash2.encode())
-                        key = hash_reconstruct(session['hash1'], hash2)
-                        collection_key = database.get_collection_key(
-                            collection_id, session['user_id'], key)
-                        response = await minio.download_file(database.get_collection_name(collection_id), path, True, SseCustomerKey(collection_key), session['jwt_token'], range_header=request.headers.get('Range'))
-                        return response
-                except Exception:
-                    if request.method == 'HEAD':
-                        return Response(headers={"Content-Type": "text/html; charset=utf-8", 'Content-Length': '0', 'Location': f'/{quote(path.strip('/'))}/'}, status_code=301)
-
-            files = await minio.get_list_files(database.get_collection_name(collection_id), path, False, session['jwt_token'])
-            html = f'<!DOCTYPE HTML><html lang="en"><head><meta charset="utf-8"><title>Directory listing for /{path}</title></head>'
-            html += f"<body><h1>Directory listing for /{path}</h1><hr><ul>"
-            if path:
-                parent_path = '/'.join(path.strip('/').split('/')[:-1])
-                parent_url = f'/collections/{collection_id}/files/{token}'
-                if parent_path:
-                    parent_url += f'/{parent_path}/'
-                html += f'<li><a href="{parent_url}">../</a></li>'
-
-            for file in files:
-                if file['isDirectory']:
-                    html += f'<li><a href="/collections/{collection_id}/files/{token}{file['path']}">{file["name"]}</a></li>'
-                else:
-                    html += f'<li><a href="/collections/{collection_id}/files/{token}{file['path']}">{file["name"]}</a></li>'
-            html += '</ul><hr></body></html>'
-
-            return HTMLResponse(html)
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail='No access'
-            )
-    else:
-        raise HTTPException(
-            status_code=401,
-            detail='Token invalid'
         )
 
 
@@ -723,31 +665,6 @@ async def search_collection(text: str, session: dict = Depends(get_current_user)
         database.add_log('search_collection_info', 500, {'error': str(
             error), 'text': text}, user_id=session['user_id'])
         raise error
-
-
-# @app.get('/search_collection_files')  # safe+ logs+
-# async def search_collection(text: str, token: str) -> list:
-#     session = await web_sessions.get_session(token[:32])
-#     if session:
-#         # Тут специально нет проверки user_id
-#         try:
-#             files = []
-#             documents = await opensearch.search_documents(text, index_name=config.open_search_files_index, jwt_token=session['jwt_token'])
-#             for document in documents:
-#                 files.append(document['_source'])
-#             return files
-#         except Exception as error:
-#             database.add_log('search_collection_files', 500, {'error': str(
-#                 error), 'text': text}, user_id=session['user_id'])
-#             raise HTTPException(
-#                 status_code=500,
-#                 detail=''
-#             )
-#     else:
-#         raise HTTPException(
-#             status_code=401,
-#             detail='Token invalid'
-#         )
 
 
 @app.post('/change_access_to_all')  # safe+ logs+

@@ -1,5 +1,5 @@
-import asyncio
 import io
+from typing import Iterable, cast
 from minio import Minio
 from minio.sse import SseCustomerKey
 from minio.error import S3Error
@@ -11,9 +11,10 @@ from minio.deleteobjects import DeleteObject
 import config
 from get_token import get_sts_token
 import zipstream
+from fastapi.concurrency import run_in_threadpool
 
 
-class MinIOClient:
+class S3Client:
     def __init__(self, endpoint: str):
         self.endpoint = endpoint
         self.cert_check = not config.debug_mode
@@ -36,14 +37,14 @@ class MinIOClient:
         try:
             if path:
                 prefix = path.strip('/') + '/'
-                objects = await asyncio.to_thread(
+                objects = await run_in_threadpool(
                     client.list_objects,
                     bucket_name,
                     recursive=recursive,
                     prefix=prefix
                 )
             else:
-                objects = await asyncio.to_thread(
+                objects = await run_in_threadpool(
                     client.list_objects,
                     bucket_name,
                     recursive=recursive
@@ -52,29 +53,30 @@ class MinIOClient:
             processed_folders = set()
 
             for obj in objects:
-                object_name = obj.object_name
-                if not object_name.endswith('NODATA'):
-                    file = {
-                        'name': obj.object_name[obj.object_name.rfind('/', 0, -1 if obj.is_dir else -2) + 1:],
-                        'isDirectory': obj.is_dir,
-                        'path': f'/{object_name}',
-                        'size': obj.size,
-                    }
-                    if obj.last_modified:
-                        file['updatedAt'] = obj.last_modified.isoformat()
-                    result.append(file)
+                if obj.object_name:
+                    object_name = obj.object_name
+                    if not object_name.endswith('NODATA'):
+                        file = {
+                            'name': obj.object_name[obj.object_name.rfind('/', 0, -1 if obj.is_dir else -2) + 1:],
+                            'isDirectory': obj.is_dir,
+                            'path': f'/{object_name}',
+                            'size': obj.size,
+                        }
+                        if obj.last_modified:
+                            file['updatedAt'] = obj.last_modified.isoformat()
+                        result.append(file)
 
-                if recursive:
-                    current_path = ''
-                    for part in object_name.split('/')[:-1]:
-                        current_path += part + '/'
-                        if current_path not in processed_folders:
-                            processed_folders.add(current_path)
-                            result.append({
-                                'name': part,
-                                'isDirectory': True,
-                                'path': f'/{current_path}'.rstrip('/'),
-                            })
+                    if recursive:
+                        current_path = ''
+                        for part in object_name.split('/')[:-1]:
+                            current_path += part + '/'
+                            if current_path not in processed_folders:
+                                processed_folders.add(current_path)
+                                result.append({
+                                    'name': part,
+                                    'isDirectory': True,
+                                    'path': f'/{current_path}'.rstrip('/'),
+                                })
             return result
         except S3Error as error:
             print(f'Error fetching files: {error.message}, {error.code}')
@@ -129,7 +131,7 @@ class MinIOClient:
                        auth['session_token'], secure=True, cert_check=self.cert_check)
 
         try:
-            buckets = await asyncio.to_thread(client.list_buckets)
+            buckets = await run_in_threadpool(client.list_buckets)
             result: list[str] = []
 
             for bucket in buckets:
@@ -174,15 +176,15 @@ class MinIOClient:
                 if not path.endswith('/'):
                     objects_to_delete.append(DeleteObject(object_name))
                 else:
-                    objects = await asyncio.to_thread(
+                    objects = await run_in_threadpool(
                         client.list_objects,
                         bucket_name, prefix=object_name + '/', recursive=True)
                     objects_to_delete.extend(
-                        [DeleteObject(obj.object_name) for obj in objects]
+                        [DeleteObject(obj.object_name) for obj in objects if obj.object_name]
                     )
 
             if objects_to_delete:
-                errors = await asyncio.to_thread(
+                errors = await run_in_threadpool(
                     lambda: list(client.remove_objects(
                         bucket_name, objects_to_delete))
                 )
@@ -209,7 +211,7 @@ class MinIOClient:
                             'message': error.message}
                 )
 
-    async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey, jwt_token: str, range_header: str | None = None) -> StreamingResponse:
+    async def download_file(self, bucket_name: str, file_path: str, preview: bool, encryption_key: SseCustomerKey | None, jwt_token: str, range_header: str | None = None) -> StreamingResponse:
         auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
         if auth is None:
             raise HTTPException(
@@ -224,17 +226,17 @@ class MinIOClient:
 
         async def file_iterator(stream, chunk_size=1024 * 1024):
             while True:
-                data = await asyncio.to_thread(stream.read, chunk_size)
+                data = await run_in_threadpool(stream.read, chunk_size)
                 if not data:
                     break
                 yield data
 
         object_name = file_path.lstrip('/')
         try:
-            stat = await asyncio.to_thread(client.stat_object, bucket_name, object_name, ssec=encryption_key)
+            stat = await run_in_threadpool(client.stat_object, bucket_name, object_name, ssec=encryption_key)
         except S3Error:
             try:
-                stat = await asyncio.to_thread(client.stat_object, bucket_name, object_name)
+                stat = await run_in_threadpool(client.stat_object, bucket_name, object_name)
                 encryption_key = None
             except S3Error as error:
                 print(f'Failed to get the file: {error.message}')
@@ -248,13 +250,14 @@ class MinIOClient:
             'Content-Length': str(file_size),
             'Accept-Ranges': 'bytes',
         }
+        
         try:
-            if range_header:
+            if range_header and file_size:
                 start_end = range_header.replace('bytes=', '').split('-')
                 start = int(start_end[0])
                 end = int(start_end[1]) if start_end[1] else file_size - 1
 
-                obj = await asyncio.to_thread(
+                obj = await run_in_threadpool(
                     client.get_object,
                     bucket_name,
                     object_name=object_name,
@@ -273,7 +276,7 @@ class MinIOClient:
                     status_code=206  # Partial Content
                 )
             else:
-                obj = await asyncio.to_thread(
+                obj = await run_in_threadpool(
                     client.get_object,
                     bucket_name,
                     object_name=object_name,
@@ -319,7 +322,7 @@ class MinIOClient:
                 if not path.endswith('/'):
                     files_to_download.append(object_name)
                 else:
-                    objects = await asyncio.to_thread(
+                    objects = await run_in_threadpool(
                         client.list_objects,
                         bucket_name,
                         prefix=object_name + '/',
@@ -327,7 +330,7 @@ class MinIOClient:
                     )
 
                     for obj in objects:
-                        if not obj.object_name.endswith('/NODATA'):
+                        if obj.object_name and not obj.object_name.endswith('/NODATA'):
                             files_to_download.append(obj.object_name)
 
             # Создаём потоковый zip-архив
@@ -349,11 +352,11 @@ class MinIOClient:
                         response.release_conn()
 
                 # Добавляем в архив "ленивый" источник данных
-                await asyncio.to_thread(z.write_iter, obj_name, file_generator())
+                await run_in_threadpool(z.write_iter, obj_name, file_generator())
 
             # Отдаём как стрим
             return StreamingResponse(
-                z,
+                cast(Iterable[bytes], z),
                 media_type="application/zip",
                 headers={"Content-Disposition": 'attachment; filename="files.zip"'}
             )
@@ -385,9 +388,9 @@ class MinIOClient:
 
         for source in source_paths:
             if source.endswith('/'):  # папка
+                prefix = source.lstrip('/')
                 try:
-                    prefix = source.lstrip('/')
-                    objects = await asyncio.to_thread(
+                    objects = await run_in_threadpool(
                         client.list_objects,
                         source_bucket_name,
                         prefix=prefix,
@@ -395,17 +398,18 @@ class MinIOClient:
                     )
                     for obj in objects:
                         object_name = obj.object_name
-                        relative_path = prefix.strip(
-                            '/').split('/')[-1] + '/' + object_name[len(prefix):].lstrip('/')
-                        destination_object_name = f'{destination_path.rstrip('/')}/{relative_path}'
-                        await asyncio.to_thread(
-                            client.copy_object,
-                            bucket_name=destination_bucket_name,
-                            object_name=destination_object_name,
-                            source=CopySource(
-                                source_bucket_name, object_name, ssec=source_encryption_key),
-                            sse=destination_encryption_key,
-                        )
+                        if object_name:
+                            relative_path = prefix.strip(
+                                '/').split('/')[-1] + '/' + object_name[len(prefix):].lstrip('/')
+                            destination_object_name = f'{destination_path.rstrip('/')}/{relative_path}'
+                            await run_in_threadpool(
+                                client.copy_object,
+                                bucket_name=destination_bucket_name,
+                                object_name=destination_object_name,
+                                source=CopySource(
+                                    source_bucket_name, object_name, ssec=source_encryption_key),
+                                sse=destination_encryption_key,
+                            )
                 except S3Error as error:
                     print(f"Failed copy folder '{prefix}': {error.message}")
                     if error.code == 'AccessDenied':
@@ -419,11 +423,11 @@ class MinIOClient:
                             detail=f"Failed copy folder '{prefix}': {error.message}"
                         )
             else:  # файл
+                filename = source.split('/')[-1]
+                destination_object_name = f'{destination_path.rstrip('/')}/{filename}'
+                object_name = source.lstrip('/')
                 try:
-                    filename = source.split('/')[-1]
-                    destination_object_name = f'{destination_path.rstrip('/')}/{filename}'
-                    object_name = source.lstrip('/')
-                    await asyncio.to_thread(
+                    await run_in_threadpool(
                         client.copy_object,
                         bucket_name=destination_bucket_name,
                         object_name=destination_object_name,
@@ -464,29 +468,30 @@ class MinIOClient:
         if object_name == new_object_name:
             raise HTTPException(
                 status_code=409,
-                detail=f"Old and new path equivalent'{bucket_name}': {error.message}"
+                detail=f"Old and new path equivalent'{bucket_name}': {object_name} = {new_object_name}"
             )
 
         if path.endswith('/'):  # папка
+            prefix = path.strip('/') + '/'
             try:
-                prefix = path.strip('/') + '/'
-                objects = await asyncio.to_thread(
+                objects = await run_in_threadpool(
                     client.list_objects,
                     bucket_name, prefix=prefix, recursive=True
                 )
                 for obj in objects:
                     object_name = obj.object_name
-                    relative_path = object_name[len(prefix):].lstrip('/')
-                    destination_object_name = f'{new_object_name}/{relative_path}'
-                    new_paths.append(destination_object_name)
-                    await asyncio.to_thread(
-                        client.copy_object,
-                        bucket_name=bucket_name,
-                        object_name=destination_object_name,
-                        source=CopySource(
-                            bucket_name, object_name, ssec=encryption_key),
-                        sse=encryption_key,
-                    )
+                    if object_name:
+                        relative_path = object_name[len(prefix):].lstrip('/')
+                        destination_object_name = f'{new_object_name}/{relative_path}'
+                        new_paths.append(destination_object_name)
+                        await run_in_threadpool(
+                            client.copy_object,
+                            bucket_name=bucket_name,
+                            object_name=destination_object_name,
+                            source=CopySource(
+                                bucket_name, object_name, ssec=encryption_key),
+                            sse=encryption_key,
+                        )
             except S3Error as error:
                 print(f"Failed copy folder '{prefix}': {error.message}")
                 if error.code == 'AccessDenied':
@@ -501,7 +506,7 @@ class MinIOClient:
                     )
         else:  # файл
             try:
-                await asyncio.to_thread(
+                await run_in_threadpool(
                     client.copy_object,
                     bucket_name=bucket_name,
                     object_name=new_object_name,
@@ -538,31 +543,33 @@ class MinIOClient:
             )
         client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
                        auth['session_token'], secure=True, cert_check=self.cert_check)
+        
 
-        object_name = path.strip('/') + '/' + file.filename.strip('/')
-        if not overwrite:
-            try:
-                await asyncio.to_thread(
-                    client.stat_object,
-                    bucket_name=bucket_name,
-                    object_name=object_name,
-                    ssec=encryption_key
-                )
-                raise HTTPException(
-                    status_code=403,
-                    detail='You cannot overwrite the file'
-                )
-            except S3Error as error:
-                pass
+        if file.filename and file.size:
+            object_name = path.strip('/') + '/' + file.filename.strip('/')
+            if not overwrite:
+                try:
+                    await run_in_threadpool(
+                        client.stat_object,
+                        bucket_name=bucket_name,
+                        object_name=object_name,
+                        ssec=encryption_key
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail='You cannot overwrite the file'
+                    )
+                except S3Error as error:
+                    pass
 
-        await asyncio.to_thread(
-            client.put_object,
-            bucket_name=bucket_name,
-            object_name=object_name,
-            data=file.file,
-            length=file.size,
-            sse=encryption_key,
-        )
+            await run_in_threadpool(
+                client.put_object,
+                bucket_name=bucket_name,
+                object_name=object_name,
+                data=file.file,
+                length=file.size,
+                sse=encryption_key,
+            )
 
     async def new_folder(self, bucket_name: str, name: str, path: str, encryption_key: SseCustomerKey, jwt_token: str):
         auth = await get_sts_token(jwt_token, 'https://' + config.s3_url, 0)
@@ -577,7 +584,7 @@ class MinIOClient:
         client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
                        auth['session_token'], secure=True, cert_check=self.cert_check)
         try:
-            await asyncio.to_thread(
+            await run_in_threadpool(
                 client.put_object,
                 bucket_name=bucket_name,
                 object_name=f'{path.strip('/')}/{name}/NODATA',
@@ -611,7 +618,7 @@ class MinIOClient:
                        auth['session_token'], secure=True, cert_check=self.cert_check)
 
         try:
-            await asyncio.to_thread(
+            await run_in_threadpool(
                 client.make_bucket,
                 bucket_name
             )
@@ -648,7 +655,7 @@ class MinIOClient:
         client = Minio(self.endpoint, auth['access_key'], auth['secret_key'],
                        auth['session_token'], secure=True, cert_check=self.cert_check)
         try:
-            await asyncio.to_thread(client.remove_bucket, bucket_name)
+            await run_in_threadpool(client.remove_bucket, bucket_name)
         except S3Error as error:
             print(
                 f"Failed remove bucket '{bucket_name}': {error.message}, {error.code}")

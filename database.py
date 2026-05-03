@@ -556,8 +556,7 @@ class MainDatabase:
                 (GroupUser.user_id == owner_user_id) &
                 (GroupUser.role_id == 1)
             ).values(role_id=2)
-            result = session.execute(query)
-            if result.rowcount == 1:
+            if session.execute(query).rowcount == 1: # type: ignore[attr-defined]
                 query = update(GroupUser).where(
                     (GroupUser.group_id == group_id) &
                     (GroupUser.user_id == user_id)
