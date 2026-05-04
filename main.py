@@ -96,17 +96,17 @@ app.add_middleware(
 )
 
 
-@app.get('/collections/list')
+@app.get('/collections')
 async def get_list_collections(session: dict = Depends(get_current_user)) -> list | None:
     return database.get_collections(session['user_id'])
 
 
-@app.post('/collections/specific_list')
+@app.post('/collections/specific')
 async def get_specific_list_collections(request: SpecificListCollectionsRequest, session: dict = Depends(get_current_user)) -> list:
     return database.get_specific_access_to_all_collections(session['user_id'], request.collection_ids)
 
 
-@app.get('/collections/{collection_id}/list/{path:path}')  # access+
+@app.get('/collection/{collection_id}/files/{path:path}')  # access+
 async def get_list_files(collection_id: int, path: str, recursive: bool = True, session: dict = Depends(get_current_user)) -> list | None:
     access = [1, 2, 3, 4]
     if database.get_type_access(collection_id, session['user_id']) in access:
@@ -123,7 +123,7 @@ async def get_list_files(collection_id: int, path: str, recursive: bool = True, 
         )
 
 
-@app.get('/collections/{collection_id}/file/{path:path}')  # access+
+@app.get('/collection/{collection_id}/file/{path:path}')  # access+
 async def get_file(collection_id: int, path: str, request: Request, token: str, preview: bool = False) -> StreamingResponse:
     session = await validate_token(token)
     if not session:
@@ -152,7 +152,7 @@ async def get_file(collection_id: int, path: str, request: Request, token: str, 
         )
 
 
-@app.get('/collections/{collection_id}/archive')  # access+
+@app.get('/collection/{collection_id}/archive')  # access+
 async def get_files(collection_id: int, files: str, token: str) -> StreamingResponse:
     session = await validate_token(token)
     if not session:
@@ -179,7 +179,7 @@ async def get_files(collection_id: int, files: str, token: str) -> StreamingResp
         )
 
 
-@app.delete('/collections/{collection_id}')  # access+
+@app.delete('/collection/{collection_id}/files')  # access+
 async def delete_files(collection_id: int, files: str, session: dict = Depends(get_current_user)):
     access = [1, 2]
     access_type = database.get_type_access(
@@ -236,7 +236,7 @@ async def copy_files(request: CopyRequest, session: dict = Depends(get_current_u
         )
 
 
-@app.post('/collections/{collection_id}/rename')  # access+
+@app.post('/collection/{collection_id}/rename')  # access+
 async def rename_file(collection_id: int, request: RenameRequest, session: dict = Depends(get_current_user)):
     access = [1, 2]
     access_type = database.get_type_access(
@@ -265,7 +265,7 @@ async def rename_file(collection_id: int, request: RenameRequest, session: dict 
         )
 
 
-@app.post('/collections/{collection_id}/create_folder')  # access+
+@app.post('/collection/{collection_id}/create_folder')  # access+
 async def create_folder(collection_id: int, request: NewFolderRequest, session: dict = Depends(get_current_user)):
     access = [1, 2, 4]
     access_type = database.get_type_access(
@@ -291,7 +291,7 @@ async def create_folder(collection_id: int, request: NewFolderRequest, session: 
         )
 
 
-@app.post('/collections/{collection_id}/upload/{path:path}')  # access+
+@app.post('/collection/{collection_id}/upload/{path:path}')  # access+
 async def upload_file(file: UploadFile, collection_id: int, path: str, session: dict = Depends(get_current_user)) -> str | None:
     access = [1, 2, 4]
     access_type = database.get_type_access(
@@ -404,12 +404,12 @@ async def add_user_to_group(request: AddUserToGroupRequest, session: dict = Depe
         raise error
 
 
-@app.get('/get_groups')  # safe+
+@app.get('/groups')  # safe+
 async def get_groups(session: dict = Depends(get_current_user)) -> list | None:
     return database.get_groups(session['user_id'])
 
 
-@app.delete('/remove_collection')  # safe+ logs+
+@app.delete('/collection/{collection_id}')  # safe+ logs+
 async def remove_collection(collection_id: int, session: dict = Depends(get_current_user)):
     collection_name = database.get_collection_name(collection_id)
     try:
@@ -427,17 +427,17 @@ async def remove_collection(collection_id: int, session: dict = Depends(get_curr
         await create_policy_to_user(username, database.get_collections(session['user_id']))
 
 
-@app.get('/get_other_users')  # safe+
+@app.get('/other_users')  # safe+
 async def get_other_users(session: dict = Depends(get_current_user)) -> list | None:
     return database.get_other_users(session['user_id'])
 
 
-@app.get('/get_access_to_collection')  # safe+
+@app.get('/collection/{collection_id}/access')  # safe+
 async def get_access_to_collection(collection_id: int, session: dict = Depends(get_current_user)) -> list | None:
     return database.get_access_to_collection(collection_id, session['user_id'])
 
 
-@app.delete('/delete_access_to_collection')  # safe+ logs+
+@app.delete('collections/access')  # safe+ logs+
 async def delete_access_to_collection(access_id: int, session: dict = Depends(get_current_user)) -> list | None:
     try:
         access_info = database.get_access_info(access_id)
@@ -459,7 +459,7 @@ async def delete_access_to_collection(access_id: int, session: dict = Depends(ge
         raise error
 
 
-@app.delete('/delete_user_to_group')  # safe+ logs+
+@app.delete('/user_to_group')  # safe+ logs+
 async def delete_user_to_group(group_id: int, user_id: int, session: dict = Depends(get_current_user)) -> list | None:
     try:
         database.delete_user_to_group(
@@ -475,12 +475,12 @@ async def delete_user_to_group(group_id: int, user_id: int, session: dict = Depe
         raise error
 
 
-@app.get('/get_group_users')  # safe+
+@app.get('/group_users')  # safe+
 async def get_group_users(group_id: int, session: dict = Depends(get_current_user)) -> list | None:
     return database.get_group_users(group_id, session['user_id'])
 
 
-@app.get('/get_access_types')  # safe+
+@app.get('/access_types')  # safe+
 async def get_access_types(session: dict = Depends(get_current_user)) -> list | None:
     return database.get_access_types()
 
@@ -498,7 +498,7 @@ async def transfer_power_to_group(group_id: int, user_id: int, session: dict = D
         raise error
 
 
-@app.delete('/exit_group')  # safe+ logs+
+@app.post('/exit_group')  # safe+ logs+
 async def exit_group(group_id: int, session: dict = Depends(get_current_user)):
     try:
         database.delete_user_to_group(
@@ -527,7 +527,7 @@ async def change_role_in_group(group_id: int, user_id: int, role_id: int, sessio
         raise error
 
 
-@app.get('/get_user_info')  # safe+
+@app.get('user_info')  # safe+
 async def get_user_info(session: dict = Depends(get_current_user)) -> dict[str, int | str]:
     return database.get_user_info(session['user_id'])
 
@@ -567,17 +567,17 @@ async def change_group_info(request: ChangeGroupInfoRequest, session: dict = Dep
         raise error
 
 
-@app.get('/get_logs')  # safe+
+@app.get('/logs')  # safe+
 async def get_logs(session: dict = Depends(get_current_user)) -> list:
     return database.get_logs(session['user_id'])
 
 
-@app.get('/get_history_collection')  # safe+
+@app.get('/collection/{collection_id}/history')  # safe+
 async def get_history_collection(collection_id: int, session: dict = Depends(get_current_user)) -> list:
     return database.get_history_collection(session['user_id'], collection_id)
 
 
-@app.post('/change_collection_info')  # safe+ logs+
+@app.post('/collection/{collection_id}/change_info')  # safe+ logs+
 async def change_collection_info(collection_id: int, data: dict, session: dict = Depends(get_current_user)):
     access = [1]
     if database.get_type_access(collection_id, session['user_id']) in access:
@@ -599,7 +599,7 @@ async def change_collection_info(collection_id: int, data: dict, session: dict =
         )
 
 
-@app.get('/get_collection_info')  # safe+ logs+
+@app.get('/collection/{collection_id}/info')  # safe+ logs+
 async def get_collection_info(collection_id: int, session: dict = Depends(get_current_user)) -> dict | None:
     access = [1, 2, 3, 4]
     if database.get_type_access(collection_id, session['user_id']) in access:
@@ -617,7 +617,7 @@ async def get_collection_info(collection_id: int, session: dict = Depends(get_cu
 
 
 # safe+ logs+
-@app.get('/collections/{collection_id}/file_info/{path:path}')
+@app.get('/collection/{collection_id}/file_info/{path:path}')
 async def get_file_info(collection_id: int, path: str, is_dir: bool, session: dict = Depends(get_current_user)) -> dict | None:
     access = [1, 2, 3, 4]
     if database.get_type_access(collection_id, session['user_id']) in access:
@@ -637,7 +637,7 @@ async def get_file_info(collection_id: int, path: str, is_dir: bool, session: di
         )
 
 
-@app.get('/search_collections')  # safe+ logs+
+@app.get('/collections/search')  # safe+ logs+
 async def search_collection(text: str, session: dict = Depends(get_current_user)) -> list:
     try:
         collections_result = []
@@ -675,7 +675,7 @@ async def search_collection(text: str, session: dict = Depends(get_current_user)
         raise error
 
 
-@app.post('/change_access_to_all')  # safe+ logs+
+@app.post('/collection/{collection_id}/change_access_to_all')  # safe+ logs+
 async def change_access_to_all(collection_id: int, is_access: bool, session: dict = Depends(get_current_user)):
     if database.get_type_access(collection_id, session['user_id']) == 1:
         key = hash_reconstruct(session['hash1'], session['hash2'])
@@ -692,7 +692,7 @@ async def change_access_to_all(collection_id: int, is_access: bool, session: dic
             raise error
 
 
-@app.post('/collections/{collection_id}/indexing_file/{path:path}')
+@app.post('/collection/{collection_id}/indexing_file/{path:path}')
 async def indexing_file(collection_id: int, path: str, session: dict = Depends(get_current_user)):
     access = [1, 2, 3, 4]
     access_type = database.get_type_access(
