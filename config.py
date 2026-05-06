@@ -52,7 +52,7 @@ class Config:
         except FileNotFoundError:
             print(f"Config file not found at {config_path}, created new file")
             with open(config_path, 'w') as file:
-                file.write(json.dumps(default_config))
+                file.write(json.dumps(default_config, indent=4))
 
             self.config = default_config
         except json.JSONDecodeError as e:
@@ -68,7 +68,7 @@ class Config:
                 missing_fields.append(field)
 
         if missing_fields:
-            print(f"Missing required fields: {', '.join(missing_fields)}")
+            print(f"Missing required fields from config: {', '.join(missing_fields)}")
 
     def __getattr__(self, name: str) -> Any:
         return self.config.get(name)

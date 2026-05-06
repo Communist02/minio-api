@@ -52,7 +52,7 @@ class GroupUser(Base):
 
 class AccessType(Base):
     __tablename__ = 'access_types'
-    __table_args__ = {'schema': 'users'}
+    __table_args__ = {'schema': 'storage'}
 
     id = Column(INT, primary_key=True)
     name = Column(VARCHAR(255), nullable=False)
