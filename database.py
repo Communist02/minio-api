@@ -1,11 +1,11 @@
 from datetime import datetime
-from sqlalchemy import DateTime, VARCHAR, Column, LargeBinary, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
+from sqlalchemy import JSON, DateTime, VARCHAR, Column, LargeBinary, INT, ForeignKey, TEXT, Index, delete, desc, event, update, func
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy import create_engine, select, insert
 import secrets
 import crypt
 import json
-import config
+from config import config
 
 
 class Base(DeclarativeBase):
@@ -14,24 +14,27 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = 'users'
+    __table_args__ = {'schema': 'users'}
 
     id = Column(INT, primary_key=True, autoincrement=True)
-    username = Column(VARCHAR(25), nullable=False)
+    username = Column(VARCHAR(64), nullable=False)
     encrypted_private_key = Column(LargeBinary(48), nullable=False)
     public_key = Column(LargeBinary(32), nullable=False)
 
 
 class Group(Base):
     __tablename__ = 'groups'
+    __table_args__ = {'schema': 'users'}
 
     id = Column(INT, primary_key=True, autoincrement=True)
-    title = Column(VARCHAR(255), nullable=False)
+    title = Column(VARCHAR(128), nullable=False)
     description = Column(TEXT, nullable=False)
     public_key = Column(LargeBinary(32), nullable=False)
 
 
 class UserRole(Base):
     __tablename__ = 'user_roles'
+    __table_args__ = {'schema': 'users'}
 
     id = Column(INT, primary_key=True)
     name = Column(VARCHAR(20))
@@ -39,6 +42,7 @@ class UserRole(Base):
 
 class GroupUser(Base):
     __tablename__ = 'group_users'
+    __table_args__ = {'schema': 'users'}
 
     user_id = Column(ForeignKey(User.id), primary_key=True)
     group_id = Column(ForeignKey(Group.id), primary_key=True)
@@ -48,6 +52,7 @@ class GroupUser(Base):
 
 class AccessType(Base):
     __tablename__ = 'access_types'
+    __table_args__ = {'schema': 'users'}
 
     id = Column(INT, primary_key=True)
     name = Column(VARCHAR(255), nullable=False)
@@ -55,10 +60,11 @@ class AccessType(Base):
 
 class Collection(Base):
     __tablename__ = 'collections'
+    __table_args__ = {'schema': 'storage'}
 
     id = Column(INT, primary_key=True, autoincrement=True)
     name = Column(VARCHAR(63), nullable=False, unique=True)
-    encrypt_key = Column(LargeBinary(32), nullable=True)
+    key = Column(LargeBinary(32), nullable=True)
 
 
 class AccessToCollection(Base):
@@ -77,15 +83,17 @@ class AccessToCollection(Base):
         Index('ux_collection_group', collection_id, group_id,
               unique=True, postgresql_where=group_id.isnot(None)),
     )
+    __table_args__ = {'schema': 'storage'}
 
 
 class Log(Base):
     __tablename__ = 'logs'
+    __table_args__ = {'schema': 'storage'}
 
     id = Column(INT, primary_key=True, autoincrement=True)
-    date_time = Column(DateTime, nullable=False)
-    action = Column(VARCHAR(255), nullable=False)
-    message = Column(TEXT, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    action = Column(VARCHAR(128), nullable=False)
+    detail = Column(JSON, nullable=True)
     result = Column(INT, nullable=False)
     user_id = Column(ForeignKey(User.id), nullable=True)
     group_id = Column(ForeignKey(Group.id), nullable=True)
@@ -114,7 +122,7 @@ def insert_initial_user_roles(target, connection, **kw):
 class MainDatabase:
     def __init__(self):
         self.engine = create_engine(
-            f'postgresql+psycopg2://{config.db_user}:{config.db_password}@localhost/{config.main_db_name}',
+            f'postgresql+psycopg2://{config.db_user}:{config.db_password}@localhost/{config.db_name}',
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=10,
@@ -122,7 +130,7 @@ class MainDatabase:
             echo=False,
         )
         self.connection = self.engine.connect()
-        Base.metadata.create_all(self.engine)
+        # Base.metadata.create_all(self.engine)
 
     def add_user(self, username: str, password: str):
         private_key, public_key = crypt.random_key_pair()
@@ -211,8 +219,8 @@ class MainDatabase:
                     collection_key = crypt.asym_decrypt_key(
                         encrypted_key, group_private_key)
                 else:
-                    query = select(Collection.encrypt_key).where(
-                        (Collection.id == collection_id) & (Collection.encrypt_key).is_not(None))
+                    query = select(Collection.key).where(
+                        (Collection.id == collection_id) & (Collection.key).is_not(None))
                     collection_key = session.execute(query).scalar_one()
             return collection_key
 
@@ -251,7 +259,7 @@ class MainDatabase:
     def get_owner_collections(self, user_id: int) -> list:
         result = []
         with Session(self.engine) as session:
-            query = select(AccessToCollection.collection_id, Collection.name, AccessToCollection.type_id, Collection.encrypt_key).where(
+            query = select(AccessToCollection.collection_id, Collection.name, AccessToCollection.type_id, Collection.key).where(
                 (AccessToCollection.user_id == user_id) & (Collection.id == AccessToCollection.collection_id) & (AccessToCollection.type_id == 1))
             collections = session.execute(query).all()
             for collection in collections:
@@ -296,7 +304,7 @@ class MainDatabase:
         result = []
         with Session(self.engine) as session:
             query = select(Collection.id, Collection.name).where(
-                (Collection.encrypt_key.is_not(None)) &
+                (Collection.key.is_not(None)) &
                 (Collection.id.not_in(
                     select(AccessToCollection.collection_id).where(
                         (AccessToCollection.user_id == user_id) |
@@ -317,7 +325,7 @@ class MainDatabase:
         result = []
         with Session(self.engine) as session:
             query = select(Collection.id, Collection.name).where(
-                (Collection.encrypt_key.is_not(None)) &
+                (Collection.key.is_not(None)) &
                 (Collection.id.in_(collection_ids)) &
                 (Collection.id.not_in(
                     select(AccessToCollection.collection_id).where(
@@ -339,7 +347,7 @@ class MainDatabase:
         result = []
         with Session(self.engine) as session:
             query = select(Collection.id, Collection.name).where(
-                Collection.encrypt_key.is_not(None))
+                Collection.key.is_not(None))
             collections = session.execute(query).all()
             for collection in collections:
                 result.append(
@@ -564,17 +572,17 @@ class MainDatabase:
                 session.execute(query)
                 session.commit()
 
-    def add_log(self, action: str, result: int, message: dict | None, user_id: int | None = None, group_id: int | None = None, collection_id: int | None = None):
+    def add_log(self, action: str, result: int, detail: dict | None, user_id: int | None = None, group_id: int | None = None, collection_id: int | None = None) -> None:
         try:
             with Session(self.engine) as session:
-                query = insert(Log).values(date_time=datetime.now(), action=action,
-                                           result=result, message=json.dumps(message), user_id=user_id, group_id=group_id, collection_id=collection_id)
+                query = insert(Log).values(created_at=datetime.now(), action=action,
+                                           result=result, detail=detail, user_id=user_id, group_id=group_id, collection_id=collection_id)
                 session.execute(query)
                 session.commit()
         except Exception as error:
             with Session(self.engine) as session:
-                query = insert(Log).values(date_time=datetime.now(), action='add_log',
-                                           result=500, message=json.dumps({'error': error, 'action': action}), user_id=user_id, group_id=group_id)
+                query = insert(Log).values(created_at=datetime.now(), action='add_log',
+                                           result=500, detail={'error': error, 'action': action}, user_id=user_id, group_id=group_id)
                 session.execute(query)
                 session.commit()
 
@@ -599,7 +607,7 @@ class MainDatabase:
             else:
                 query = select(Collection.id).where(
                     (Collection.id == collection_id) &
-                    (Collection.encrypt_key.is_not(None))
+                    (Collection.key.is_not(None))
                 )
                 if session.execute(query).scalar():
                     return 3
@@ -680,19 +688,19 @@ class MainDatabase:
 
     def get_logs(self, user_id: int) -> list:
         with Session(self.engine) as session:
-            query = select(Log.id, Log.date_time, Log.action, Log.result,
-                           Log.message, Log.group_id, Log.collection_id).where(Log.user_id == user_id).order_by(desc(Log.id)).limit(500)
+            query = select(Log.id, Log.created_at, Log.action, Log.result,
+                           Log.detail, Log.group_id, Log.collection_id).where(Log.user_id == user_id).order_by(desc(Log.id)).limit(500)
             result = session.execute(query).all()
             logs = []
             for log in result:
                 logs.append(
-                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': json.loads(log[4]), 'group_id': log[5], 'collection_id': log[6]})
+                    {'id': log[0], 'date_time': log[1], 'action': log[2], 'result': log[3], 'message': log[4], 'group_id': log[5], 'collection_id': log[6]})
             return logs
 
     def get_history_collection(self, user_id: int, collection_id: int) -> list:
         with Session(self.engine) as session:
             query = select(
-                Log.id, Log.date_time, Log.action, Log.result, Log.message, Log.group_id, Log.collection_id, User.username,
+                Log.id, Log.created_at, Log.action, Log.result, Log.detail, Log.group_id, Log.collection_id, User.username,
             ).where(
                 (Log.collection_id == collection_id) &
                 (Log.collection_id.in_(
@@ -720,13 +728,13 @@ class MainDatabase:
                     (Collection.id == AccessToCollection.collection_id) &
                     (AccessToCollection.user_id == user_id) &
                     (AccessToCollection.type_id == 1)
-                ).values(encrypt_key=collection_key)
+                ).values(key=collection_key)
             else:
                 query = update(Collection).where(
                     (Collection.id == collection_id) &
                     (Collection.id == AccessToCollection.collection_id) &
                     (AccessToCollection.user_id == user_id) &
                     (AccessToCollection.type_id == 1)
-                ).values(encrypt_key=None)
+                ).values(key=None)
             session.execute(query)
             session.commit()

@@ -10,7 +10,7 @@ from s3_client import S3Client
 from policy import create_policy_to_all, create_policy_to_user
 from database import MainDatabase
 from crypt import hash_reconstruct
-import config
+from config import config
 from opensearch import OpenSearchManager
 from validate import get_current_user, validate_token
 
@@ -292,7 +292,8 @@ async def create_folder(collection_id: int, request: NewFolderRequest, session: 
 
 
 @app.post('/collection/{collection_id}/upload/{path:path}')  # access+
-async def upload_file(file: UploadFile, collection_id: int, path: str, session: dict = Depends(get_current_user)) -> str | None:
+@app.post('/collection/{collection_id}/upload')
+async def upload_file(file: UploadFile, collection_id: int, path: str = '/', session: dict = Depends(get_current_user)) -> str | None:
     access = [1, 2, 4]
     access_type = database.get_type_access(
         collection_id, session['user_id'])
@@ -323,6 +324,7 @@ async def upload_file(file: UploadFile, collection_id: int, path: str, session: 
 @app.post('/create_collection')  # safe+ logs+
 async def create_collection(request: CreateCollectionRequest, session: dict = Depends(get_current_user)) -> int:
     try:
+        request.name = request.name.strip()
         await minio.create_bucket(request.name, session['jwt_token'])
         collection_id = database.create_collection(
             request.name, session['user_id'])
@@ -334,6 +336,15 @@ async def create_collection(request: CreateCollectionRequest, session: dict = De
     except HTTPException as error:
         database.add_log('create_collection', error.status_code,
                          {'error': error.detail, 'name': request.name}, user_id=session['user_id'])
+        raise error
+    except Exception as error:
+        database.add_log('create_collection', 500,
+                         {'error': str(error), 'name': request.name}, user_id=session['user_id'])
+        try:
+            await minio.remove_bucket(request.name, session['jwt_token'])
+        except HTTPException as e:
+            database.add_log('remove_collection_after_create', e.status_code, {
+                'error': e.detail, 'collection_name': request.name}, user_id=session['user_id'])
         raise error
     return collection_id
 
@@ -527,7 +538,7 @@ async def change_role_in_group(group_id: int, user_id: int, role_id: int, sessio
         raise error
 
 
-@app.get('user_info')  # safe+
+@app.get('/user_info')  # safe+
 async def get_user_info(session: dict = Depends(get_current_user)) -> dict[str, int | str]:
     return database.get_user_info(session['user_id'])
 

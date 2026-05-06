@@ -1,5 +1,5 @@
 from opensearchpy import NotFoundError, AsyncOpenSearch
-import config
+from config import config
 
 # auth = ('admin', os.getenv('OPENSEARCH_PASS'))
 # For testing only. Don't store credentials in code.

@@ -1,6 +1,6 @@
 import httpx
 import xml.etree.ElementTree as ET
-import config
+from config import config
 
 
 async def get_sts_token(token: str, endpoint: str, duration=2592000) -> dict | None:

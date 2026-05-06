@@ -1,9 +1,9 @@
 import base64
-
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import httpx
-import config
+from config import config
+
 
 security = HTTPBearer()
 

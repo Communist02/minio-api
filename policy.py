@@ -3,7 +3,7 @@ from fastapi import HTTPException
 import httpcore
 from httpx_aws_auth import AwsSigV4Auth, AwsCredentials
 import httpx
-import config
+from config import config
 from opensearch import OpenSearchManager
 
 

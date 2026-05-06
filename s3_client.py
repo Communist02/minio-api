@@ -8,7 +8,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
 from minio.deleteobjects import DeleteObject
-import config
+from config import config
 from get_token import get_sts_token
 import zipstream
 from fastapi.concurrency import run_in_threadpool

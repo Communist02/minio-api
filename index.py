@@ -1,5 +1,5 @@
 import httpx
-import config
+from config import config
 import base64
 
 
