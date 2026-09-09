@@ -57,15 +57,17 @@ class Config:
                 config_updated = True
 
         if missing_fields:
-            print(f"Missing required fields from config: {', '.join(missing_fields)}")
+            print(
+                f"Missing required fields from config: {', '.join(missing_fields)}")
             print(f"Added missing fields with default values")
-            
+
         # Если конфиг был обновлен, сохраняем его в файл
         if config_updated:
             try:
                 with open(config_path, 'w') as file:
                     json.dump(self.config, file, indent=4)
-                print(f"Config file updated with missing fields at: {config_path}")
+                print(
+                    f"Config file updated with missing fields at: {config_path}")
             except Exception as e:
                 print(f"Warning: Could not save updated config to file: {e}")
 

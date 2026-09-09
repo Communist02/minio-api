@@ -8,16 +8,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
 
 
-def hash_division(hash: bytes) -> tuple[bytes, bytes]:
-    part1 = secrets.token_bytes(len(hash))
-    part2 = bytes(h ^ p for h, p in zip(hash, part1))
-    return part1, part2
-
-
-def hash_reconstruct(part1: bytes, part2: bytes) -> bytes:
-    return bytes(a ^ b for a, b in zip(part1, part2))
-
-
 def generate_x25519_keypair() -> tuple[bytes, bytes]:
     """
     Returns:

@@ -24,18 +24,14 @@ async def validate_token(token: str) -> dict | None:
         print("Client certificate or private key not provided. Skipping client certificate authentication.")
 
     async with httpx.AsyncClient(verify=context) as client:
-        response = await client.get(
+        response = await client.post(
             f'{config.auth_api_url}/introspect',
             headers={'Authorization': f'Bearer {token}'},
         )
     if response.status_code == 200:
         session = response.json()
         if session['active'] == True:
-            session['hash1'] = base64.urlsafe_b64decode(
-                session['hash1'].encode())
-            session['hash2'] = base64.urlsafe_b64decode(
-                session['hash2'].encode())
-            session['jwt_token'] = session['jwt']
+            session['user_key'] = base64.urlsafe_b64decode(session['user_key'].encode())
             return session
 
 
